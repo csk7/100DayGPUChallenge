@@ -1,9 +1,10 @@
 #include<iostream>
 #include<cuda.h>
 
-
-void assignHostSpace(float** hostArr, int rows, int cols)
+#define TILE_WIDTH 4
+float** assignHostSpace(int rows, int cols)
 {
+    float** hostArr;
     hostArr = new float*[rows];
     for(int i=0; i<rows; i++)
     {
@@ -13,6 +14,7 @@ void assignHostSpace(float** hostArr, int rows, int cols)
             hostArr[i][j] = 0;
         }
     }
+    return hostArr;
 }
 
 void assignHostValues(float** hostArr, int rows, int cols)
@@ -43,15 +45,18 @@ void matMulCpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
     }
 }
 
-void mismatch2D(float* cpuArr, float* gpuArr, int N)
+void mismatch2D(float** cpuArr, float** gpuArr, int row, int col)
 {
     int flag = 1;
-    for(int i=0; i<N; i++)
+    for(int i=0; i<row; i++)
     {
-        if(cpuArr[i] != gpuArr[i])
+        for(int j = 0; j<col; j++)
         {
-            flag = 0;
-            printf("Mismatch at : %d, CPU: %f ; GPU: %f \n",i,cpuArr[i],gpuArr[i]);
+            if(cpuArr[i][j] != gpuArr[i][j])
+            {
+                flag = 0;
+                printf("Mismatch at : (%d,%d), CPU: %f ; GPU: %f \n",i,j,cpuArr[i][j],gpuArr[i][j]);
+            }
         }
     }
     if(flag == 1)
@@ -72,10 +77,8 @@ float* convert_2D_to_1D(float** inpArr, int rows, int cols)
     return outArr;
 }
 
-float** convert_1D_to_2D(float* inpArr, int rows, int cols)
+void convert_1D_to_2D(float* inpArr, float** outArr, int rows, int cols)
 {
-    float** outArr;
-    assignHostSpace(outArr, rows, cols);
     for(int i=0 ;i<rows; i++)
     {
         for(int j=0; j<cols; j++)
@@ -83,7 +86,6 @@ float** convert_1D_to_2D(float* inpArr, int rows, int cols)
             outArr[i][j] = inpArr[i*cols + j];
         }
     }
-    return outArr;
 }
 
 __global__ void matMulKernel(float* d_A, float* d_B, float* d_C, int M, int N, int K)
@@ -94,24 +96,24 @@ __global__ void matMulKernel(float* d_A, float* d_B, float* d_C, int M, int N, i
     __shared__ float MdS[TILE_WIDTH][TILE_WIDTH];
     __shared__ float NdS[TILE_WIDTH][TILE_WIDTH];
 
-    float pSum = 0.0
+    float pSum = 0.0;
 
     for(int ph = 0; ph<(N/TILE_WIDTH); ph++)
     {
         //Load shared Mem
-        if(row<M && (ph*TILE_WIDTH + tx)<N)
-            MdS[ty][tx] = d_A[row*N + (ph*TILE_WIDTH + tx)];
+        if(row<M && (ph*TILE_WIDTH + threadIdx.x)<N)
+            MdS[threadIdx.y][threadIdx.x] = d_A[row*N + (ph*TILE_WIDTH + threadIdx.x)];
         else
-            MdS[ty][tx] = 0.0
-        if((ph*TILE_WIDTH + ty)<N && col<K)
-            NdS[ty][tx] = d_B[(ph*TILE_WIDTH + ty)*K + col];
+            MdS[threadIdx.y][threadIdx.x] = 0.0;
+        if((ph*TILE_WIDTH + threadIdx.y)<N && col<K)
+            NdS[threadIdx.y][threadIdx.x] = d_B[(ph*TILE_WIDTH + threadIdx.y)*K + col];
         else
-            NdS[ty][tx] = 0.0
+            NdS[threadIdx.y][threadIdx.x] = 0.0;
         __syncthreads();
         //Partial dot product
         for(int i = 0; i<TILE_WIDTH; i++)
         {
-            pSum += (MdS[ty][i] * NdS[i][tx]);
+            pSum += (MdS[threadIdx.y][i] * NdS[i][threadIdx.x]);
         }
         __syncthreads();
     }
@@ -125,8 +127,8 @@ void matMulGpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
 {
 
     //Prep Host values
-    float* h_A_1D = convert_2D_to_1D(h_A);
-    float* h_B_1D = convert_2D_to_1D(h_B);
+    float* h_A_1D = convert_2D_to_1D(h_A, M, N);
+    float* h_B_1D = convert_2D_to_1D(h_B, N, K);
 
     //Declare device variables
     float* d_A;
@@ -142,7 +144,7 @@ void matMulGpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
 
     //Copy values to device
     cudaMemcpy(d_A, h_A_1D, sizeA, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, h_B_1D, sizeB, cudaMemcpyHostToDevice;
+    cudaMemcpy(d_B, h_B_1D, sizeB, cudaMemcpyHostToDevice);
 
     //Call Kernel
     dim3 blockSize(TILE_WIDTH,TILE_WIDTH,1);
@@ -151,8 +153,9 @@ void matMulGpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
     matMulKernel<<<gridSize, blockSize>>>(d_A, d_B, d_C, M, N, K);
 
     //Copy values back
+    float* h_C_1D = new float[M*K];
     cudaMemcpy(h_C_1D, d_C, sizeC, cudaMemcpyDeviceToHost);
-    h_C = convert_1D_to_2D(h_C_1D, M, K);
+    convert_1D_to_2D(h_C_1D, h_C, M, K);
     
     //Free device space
     cudaFree(d_A);
@@ -163,18 +166,14 @@ void matMulGpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
 int main()
 {
     //Declare host variables
-    float** h_A;
-    float** h_B;
-    float** h_C_cpu;
-    float** h_C_gpu;
-
     int M = 4;
     int N = 4;
     int K = 4;
 
-    assignHostSpace(h_A, M, N);
-    assignHostSpace(h_B, N, K);
-    assignHostSpace(h_C_cpu, M, K);
+    float** h_A = assignHostSpace(M, N);
+    float** h_B = assignHostSpace(N, K);
+    float** h_C_cpu = assignHostSpace(M, K);
+    float** h_C_gpu = assignHostSpace(M, K);
 
     //Assign values
     assignHostValues(h_A, M, N);
