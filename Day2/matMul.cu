@@ -94,9 +94,30 @@ __global__ void matMulKernel(float* d_A, float* d_B, float* d_C, int M, int N, i
     __shared__ float MdS[TILE_WIDTH][TILE_WIDTH];
     __shared__ float NdS[TILE_WIDTH][TILE_WIDTH];
 
+    float pSum = 0.0
+
     for(int ph = 0; ph<(N/TILE_WIDTH); ph++)
     {
-        
+        //Load shared Mem
+        if(row<M && (ph*TILE_WIDTH + tx)<N)
+            MdS[ty][tx] = d_A[row*N + (ph*TILE_WIDTH + tx)];
+        else
+            MdS[ty][tx] = 0.0
+        if((ph*TILE_WIDTH + ty)<N && col<K)
+            NdS[ty][tx] = d_B[(ph*TILE_WIDTH + ty)*K + col];
+        else
+            NdS[ty][tx] = 0.0
+        __syncthreads();
+        //Partial dot product
+        for(int i = 0; i<TILE_WIDTH; i++)
+        {
+            pSum += (MdS[ty][i] * NdS[i][tx]);
+        }
+        __syncthreads();
+    }
+    if(row<M && col<K)
+    {
+        d_C[row*K + col] = pSum;
     }
 }
 
