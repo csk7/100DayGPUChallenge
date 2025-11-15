@@ -31,7 +31,7 @@ void assignHostValues(float** hostArr, int rows, int cols)
 void matMulCpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
 {
     float pSum = 0.0;
-    for(int i = 0; i<N; i++)
+    for(int i = 0; i<M; i++)
     {
         for(int j=0; j<K; j++)
         {
@@ -93,27 +93,29 @@ __global__ void matMulKernel(float* d_A, float* d_B, float* d_C, int M, int N, i
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
-    __shared__ float MdS[TILE_WIDTH][TILE_WIDTH];
-    __shared__ float NdS[TILE_WIDTH][TILE_WIDTH];
+    extern __shared__ float shMem[];
+    
+    float* MdS = shMem;
+    float* NdS = &shMem[TILE_WIDTH*TILE_WIDTH];
 
     float pSum = 0.0;
 
-    for(int ph = 0; ph<(N/TILE_WIDTH); ph++)
+    for(int ph = 0; ph<((N+TILE_WIDTH-1)/TILE_WIDTH); ph++)
     {
         //Load shared Mem
         if(row<M && (ph*TILE_WIDTH + threadIdx.x)<N)
-            MdS[threadIdx.y][threadIdx.x] = d_A[row*N + (ph*TILE_WIDTH + threadIdx.x)];
+            MdS[threadIdx.y*TILE_WIDTH + threadIdx.x] = d_A[row*N + (ph*TILE_WIDTH + threadIdx.x)];
         else
-            MdS[threadIdx.y][threadIdx.x] = 0.0;
+            MdS[threadIdx.y*TILE_WIDTH + threadIdx.x] = 0.0;
         if((ph*TILE_WIDTH + threadIdx.y)<N && col<K)
-            NdS[threadIdx.y][threadIdx.x] = d_B[(ph*TILE_WIDTH + threadIdx.y)*K + col];
+            NdS[threadIdx.y*TILE_WIDTH + threadIdx.x] = d_B[(ph*TILE_WIDTH + threadIdx.y)*K + col];
         else
-            NdS[threadIdx.y][threadIdx.x] = 0.0;
+            NdS[threadIdx.y*TILE_WIDTH + threadIdx.x] = 0.0;
         __syncthreads();
         //Partial dot product
         for(int i = 0; i<TILE_WIDTH; i++)
         {
-            pSum += (MdS[threadIdx.y][i] * NdS[i][threadIdx.x]);
+            pSum += (MdS[threadIdx.y*TILE_WIDTH + i] * NdS[i*TILE_WIDTH + threadIdx.x]);
         }
         __syncthreads();
     }
@@ -149,8 +151,9 @@ void matMulGpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
     //Call Kernel
     dim3 blockSize(TILE_WIDTH,TILE_WIDTH,1);
     dim3 gridSize(((K + blockSize.x -1)/blockSize.x),((M + blockSize.y -1)/blockSize.y), 1);
+    size_t shMemSize = 2*TILE_WIDTH*TILE_WIDTH*sizeof(float);
 
-    matMulKernel<<<gridSize, blockSize>>>(d_A, d_B, d_C, M, N, K);
+    matMulKernel<<<gridSize, blockSize, shMemSize>>>(d_A, d_B, d_C, M, N, K);
 
     //Copy values back
     float* h_C_1D = new float[M*K];
@@ -166,9 +169,9 @@ void matMulGpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
 int main()
 {
     //Declare host variables
-    int M = 4;
-    int N = 4;
-    int K = 4;
+    int M = 16;
+    int N = 12;
+    int K = 12;
 
     float** h_A = assignHostSpace(M, N);
     float** h_B = assignHostSpace(N, K);
