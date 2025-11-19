@@ -1,8 +1,12 @@
 #include<iostream>
 #include<cuda.h>
 
-#define TILE_WIDTH 16
-#define BLOCK_TILE_1D 4
+#define H_TILE_WIDTH 32
+#define H_BLOCK_TILE_COL_STRIDE 4
+#define H_BLOCK_TILE_ROW_STRIDE 4
+#define COMMON_DIM_BLOCK_STRIDE 4
+#define CEIL_CUSTOM(M, N) (((M) + (N) - 1)/(N))
+
 float** assignHostSpace(int rows, int cols)
 {
     float** hostArr;
@@ -24,7 +28,7 @@ void assignHostValues(float** hostArr, int rows, int cols)
     {
         for(int j=0; j<cols; j++)
         {
-            hostArr[i][j] = i*cols + j;
+            hostArr[i][j] = float(uint(i*cols + j)%100);
         }
     }
 }
@@ -89,58 +93,78 @@ void convert_1D_to_2D(float* inpArr, float** outArr, int rows, int cols)
     }
 }
 
+template<const int TILE_WIDTH, const int BLOCK_TILE_COL_STRIDE, const int BLOCK_TILE_ROW_STRIDE>
 __global__ void matMulKernel(float* d_A, float* d_B, float* d_C, int M, int N, int K)
 {
     /* Block Tiling. This allows data reuse of A. So the AI increase as you can do more compute for same A block that is read into shared Mem.
     Cols in B are accessed sequentially.
     */
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * (BLOCK_TILE_1D * blockDim.x) + threadIdx.x; //Effective BlockSize in Col Dimension. This is also reflected in the grid Dimension declaration.
+    int row = blockIdx.y * (BLOCK_TILE_ROW_STRIDE * blockDim.y) + threadIdx.y;
+    int col = blockIdx.x * (BLOCK_TILE_COL_STRIDE * blockDim.x) + threadIdx.x; //Effective BlockSize in Col Dimension. This is also reflected in the grid Dimension declaration.
 
     extern __shared__ float shMem[];
     
     float* MdS = shMem; //MdS contains the starting address
-    float* NdS = &shMem[TILE_WIDTH*TILE_WIDTH];
+    float* NdS = &shMem[BLOCK_TILE_ROW_STRIDE*TILE_WIDTH*TILE_WIDTH];
 
-    float pSum[BLOCK_TILE_1D] = {0.0}; //Multiple pSum local variables
+    float pSum[BLOCK_TILE_ROW_STRIDE * BLOCK_TILE_COL_STRIDE] = {0.0}; //Multiple pSum local variables
 
     for(int ph = 0; ph<((N+TILE_WIDTH-1)/TILE_WIDTH); ph++)
     {
         //Load shared Mem
-        if(row<M && (ph*TILE_WIDTH + threadIdx.x)<N)
-            MdS[threadIdx.y*TILE_WIDTH + threadIdx.x] = d_A[row*N + (ph*TILE_WIDTH + threadIdx.x)];
-        else
-            MdS[threadIdx.y*TILE_WIDTH + threadIdx.x] = 0.0;
-        for(int idx_Block1D = 0; idx_Block1D<BLOCK_TILE_1D; idx_Block1D++)
+        for(int idx_Block1D = 0; idx_Block1D<(BLOCK_TILE_ROW_STRIDE*TILE_WIDTH); idx_Block1D+=TILE_WIDTH)
         {
-            if((ph*TILE_WIDTH + threadIdx.y)<N && (col + idx_Block1D*TILE_WIDTH)<K)
+            if((row + idx_Block1D)<M && (ph*TILE_WIDTH + threadIdx.x)<N)
+                MdS[(threadIdx.y + idx_Block1D)*TILE_WIDTH + threadIdx.x] = d_A[(row + idx_Block1D)*N + (ph*TILE_WIDTH + threadIdx.x)];
+            else
+                MdS[(threadIdx.y + idx_Block1D)*TILE_WIDTH + threadIdx.x] = 0.0;
+        }
+
+        for(int idx_Block1D = 0; idx_Block1D<(BLOCK_TILE_COL_STRIDE*TILE_WIDTH); idx_Block1D+=TILE_WIDTH)
+        {
+            if((ph*TILE_WIDTH + threadIdx.y)<N && (col + idx_Block1D)<K)
             {
                 //Each thread has to load multiple NdS from d_B. Jump for same thread is TILE_WIDTH
                 //The NdS no.of cols also increase --> y index jump change
-                NdS[threadIdx.y*(BLOCK_TILE_1D*TILE_WIDTH) + idx_Block1D*TILE_WIDTH + threadIdx.x] = d_B[(ph*TILE_WIDTH + threadIdx.y)*K + col + idx_Block1D*TILE_WIDTH];
+                NdS[threadIdx.y*(BLOCK_TILE_COL_STRIDE*TILE_WIDTH) + idx_Block1D + threadIdx.x] = d_B[(ph*TILE_WIDTH + threadIdx.y)*K + col + idx_Block1D];
             }
             else
             {
-                NdS[threadIdx.y*(BLOCK_TILE_1D*TILE_WIDTH) + idx_Block1D*TILE_WIDTH + threadIdx.x] = 0.0;
+                NdS[threadIdx.y*(BLOCK_TILE_COL_STRIDE*TILE_WIDTH) + idx_Block1D + threadIdx.x] = 0.0;
             }
         }
         __syncthreads();
         //Partial dot product
+        float tempMdS[BLOCK_TILE_ROW_STRIDE] = {0.0};
+        float tempNdS[BLOCK_TILE_COL_STRIDE] = {0.0};
         for(int i = 0; i<TILE_WIDTH; i++)
         {
-            float tempMdS = MdS[threadIdx.y*TILE_WIDTH + i]; //Cache MdS in temp local reg. 
-            for(int idx_Block1D = 0; idx_Block1D<BLOCK_TILE_1D; idx_Block1D++)
+            for(int idx_BlockRow = 0; idx_BlockRow < BLOCK_TILE_ROW_STRIDE; idx_BlockRow++)
             {
-                pSum[idx_Block1D] += (tempMdS* NdS[i*(BLOCK_TILE_1D*TILE_WIDTH) + idx_Block1D*TILE_WIDTH + threadIdx.x]); //Row jump is scaled, TILE_WIDTH Col increase for evry iter of inner loop
+                tempMdS[idx_BlockRow] = MdS[(threadIdx.y+idx_BlockRow*TILE_WIDTH)*TILE_WIDTH + i]; //Cache MdS in temp local reg. 
+            }
+            for(int idx_BlockCol = 0; idx_BlockCol<BLOCK_TILE_COL_STRIDE; idx_BlockCol++)
+            {
+                tempNdS[idx_BlockCol] = NdS[i*(BLOCK_TILE_COL_STRIDE*TILE_WIDTH) + idx_BlockCol*TILE_WIDTH + threadIdx.x];
+            }
+            for(int idx_BlockRow = 0; idx_BlockRow < BLOCK_TILE_ROW_STRIDE; idx_BlockRow++)
+            {
+                for(int idx_BlockCol = 0; idx_BlockCol<BLOCK_TILE_COL_STRIDE; idx_BlockCol++)
+                {
+                    pSum[idx_BlockRow*BLOCK_TILE_COL_STRIDE + idx_BlockCol] += (tempMdS[idx_BlockRow]* tempNdS[idx_BlockCol]); //Row jump is scaled, TILE_WIDTH Col increase for evry iter of inner loop
+                }
             }
         }
         __syncthreads();
     }
-    for(int idx_Block1D = 0; idx_Block1D<BLOCK_TILE_1D; idx_Block1D++)
+    for(int idx_BlockRow = 0; idx_BlockRow < BLOCK_TILE_ROW_STRIDE; idx_BlockRow++)
     {
-        if(row<M && (col + (idx_Block1D*TILE_WIDTH))<K)
+        for(int idx_BlockCol = 0; idx_BlockCol<BLOCK_TILE_COL_STRIDE; idx_BlockCol++)
         {
-            d_C[row*K + (idx_Block1D*TILE_WIDTH) + col] = pSum[idx_Block1D]; /
+            if((row+idx_BlockRow*TILE_WIDTH)<M && (col + (idx_BlockCol*TILE_WIDTH))<K)
+            {
+                d_C[(row+idx_BlockRow*TILE_WIDTH)*K + (idx_BlockCol*TILE_WIDTH) + col] = pSum[idx_BlockRow*BLOCK_TILE_COL_STRIDE + idx_BlockCol]; 
+            }
         }
     }
 }
@@ -168,11 +192,11 @@ void matMulGpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
     cudaMemcpy(d_B, h_B_1D, sizeB, cudaMemcpyHostToDevice);
 
     //Call Kernel
-    dim3 blockSize(TILE_WIDTH,TILE_WIDTH,1);
-    dim3 gridSize(((K + (blockSize.x* BLOCK_TILE_1D)-1)/(blockSize.x * BLOCK_TILE_1D)),((M + blockSize.y -1)/blockSize.y), 1);
-    size_t shMemSize = (1+BLOCK_TILE_1D)*TILE_WIDTH*TILE_WIDTH*sizeof(float);
+    dim3 blockSize(H_TILE_WIDTH,H_TILE_WIDTH,1);
+    dim3 gridSize(CEIL_CUSTOM(K,blockSize.x * H_BLOCK_TILE_COL_STRIDE),CEIL_CUSTOM(M,blockSize.y* H_BLOCK_TILE_ROW_STRIDE),1);
+    size_t shMemSize = (H_BLOCK_TILE_ROW_STRIDE+H_BLOCK_TILE_COL_STRIDE)*H_TILE_WIDTH*H_TILE_WIDTH*sizeof(float);
 
-    matMulKernel<<<gridSize, blockSize, shMemSize>>>(d_A, d_B, d_C, M, N, K);
+    matMulKernel<H_TILE_WIDTH, H_BLOCK_TILE_COL_STRIDE, H_BLOCK_TILE_ROW_STRIDE><<<gridSize, blockSize, shMemSize>>>(d_A, d_B, d_C, M, N, K);
 
     //Copy values back
     float* h_C_1D = new float[M*K];
@@ -188,9 +212,9 @@ void matMulGpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
 int main()
 {
     //Declare host variables
-    int M = 64;
-    int N = 32;
-    int K = 128;
+    int M = 32;//8162;
+    int N = 64;//6144;
+    int K = 128;//4092;
 
     float** h_A = assignHostSpace(M, N);
     float** h_B = assignHostSpace(N, K);

@@ -1,7 +1,7 @@
 #include<iostream>
 #include<cuda.h>
 
-#define TILE_WIDTH 4
+#define TILE_WIDTH 16
 float** assignHostSpace(int rows, int cols)
 {
     float** hostArr;
@@ -169,9 +169,9 @@ void matMulGpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
 int main()
 {
     //Declare host variables
-    int M = 16;
-    int N = 12;
-    int K = 12;
+    int M = 8162;
+    int N = 6144;
+    int K = 4092;
 
     float** h_A = assignHostSpace(M, N);
     float** h_B = assignHostSpace(N, K);
@@ -183,11 +183,11 @@ int main()
     assignHostValues(h_B, N, K);
 
     //Call CPU and GPU
-    matMulCpu(h_A, h_B, h_C_cpu, M, N, K);
+    //matMulCpu(h_A, h_B, h_C_cpu, M, N, K);
     matMulGpu(h_A, h_B, h_C_gpu, M, N, K);
 
     //compare
-    mismatch2D(h_C_cpu, h_C_gpu, M, K);
+    //mismatch2D(h_C_cpu, h_C_gpu, M, K);
 
     return 0;
 }

@@ -4,6 +4,7 @@
 #define H_TILE_WIDTH 16
 #define H_BLOCK_TILE_COL_STRIDE 4
 #define H_BLOCK_TILE_ROW_STRIDE 4
+#define EXTRA_COL 3
 #define CEIL_CUSTOM(M, N) (((M) + (N) - 1)/(N))
 
 float** assignHostSpace(int rows, int cols)
@@ -126,8 +127,12 @@ __global__ void matMulKernel(float* d_A, float* d_B, float* d_C, int M, int N, i
             {
                 //Each thread has to load multiple NdS from d_B. Jump for same thread is TILE_WIDTH
                 //The NdS no.of cols also increase --> y index jump change
-                reinterpret_cast<float4*>(&NdS[threadIdx.y*(BLOCK_TILE_COL_STRIDE*TILE_WIDTH) + idx_Block1D*TILE_WIDTH + 4*threadIdx.x])[0] = reinterpret_cast<float4*>(&d_B[(ph*TILE_WIDTH + threadIdx.y)*K + (col - threadIdx.x + 4*threadIdx.x) + idx_Block1D*TILE_WIDTH])[0];
-
+                float4 tmp = reinterpret_cast<float4*>(&d_B[(ph*TILE_WIDTH + threadIdx.y)*K + (col - threadIdx.x + 4*threadIdx.x) + idx_Block1D*TILE_WIDTH])[0];
+                NdS[threadIdx.y*(BLOCK_TILE_COL_STRIDE*TILE_WIDTH + EXTRA_COL) + idx_Block1D*TILE_WIDTH + 4*threadIdx.x + 0] = tmp.x;
+                NdS[threadIdx.y*(BLOCK_TILE_COL_STRIDE*TILE_WIDTH + EXTRA_COL) + idx_Block1D*TILE_WIDTH + 4*threadIdx.x + 1] = tmp.y;
+                NdS[threadIdx.y*(BLOCK_TILE_COL_STRIDE*TILE_WIDTH + EXTRA_COL) + idx_Block1D*TILE_WIDTH + 4*threadIdx.x + 2] = tmp.z;
+                NdS[threadIdx.y*(BLOCK_TILE_COL_STRIDE*TILE_WIDTH + EXTRA_COL) + idx_Block1D*TILE_WIDTH + 4*threadIdx.x + 3] = tmp.w;
+            
             }
         }
         __syncthreads();
@@ -139,7 +144,7 @@ __global__ void matMulKernel(float* d_A, float* d_B, float* d_C, int M, int N, i
                 float tempMdS = MdS[(threadIdx.y+idx_BlockRow*TILE_WIDTH)*TILE_WIDTH + i]; //Cache MdS in temp local reg. 
                 for(int idx_BlockCol = 0; idx_BlockCol<BLOCK_TILE_COL_STRIDE; idx_BlockCol++)
                 {
-                    pSum[idx_BlockRow*BLOCK_TILE_COL_STRIDE + idx_BlockCol] += (tempMdS* NdS[i*(BLOCK_TILE_COL_STRIDE*TILE_WIDTH) + idx_BlockCol*TILE_WIDTH + threadIdx.x]); //Row jump is scaled, TILE_WIDTH Col increase for evry iter of inner loop
+                    pSum[idx_BlockRow*BLOCK_TILE_COL_STRIDE + idx_BlockCol] += (tempMdS* NdS[i*(BLOCK_TILE_COL_STRIDE*TILE_WIDTH + EXTRA_COL) + idx_BlockCol*TILE_WIDTH + threadIdx.x]); //Row jump is scaled, TILE_WIDTH Col increase for evry iter of inner loop
                 }
             }
         }
@@ -182,7 +187,7 @@ void matMulGpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
     //Call Kernel
     dim3 blockSize(H_TILE_WIDTH, H_TILE_WIDTH,1);
     dim3 gridSize(CEIL_CUSTOM(K,blockSize.x * H_BLOCK_TILE_COL_STRIDE),CEIL_CUSTOM(M,blockSize.y * H_BLOCK_TILE_ROW_STRIDE),1);
-    size_t shMemSize = (H_BLOCK_TILE_ROW_STRIDE+H_BLOCK_TILE_COL_STRIDE)*H_TILE_WIDTH*H_TILE_WIDTH*sizeof(float);
+    size_t shMemSize = (H_BLOCK_TILE_ROW_STRIDE*H_TILE_WIDTH*H_TILE_WIDTH + (H_BLOCK_TILE_COL_STRIDE*H_TILE_WIDTH + EXTRA_COL)*H_TILE_WIDTH)*sizeof(float);
 
     matMulKernel<H_TILE_WIDTH, H_BLOCK_TILE_COL_STRIDE, H_BLOCK_TILE_ROW_STRIDE><<<gridSize, blockSize, shMemSize>>>(d_A, d_B, d_C, M, N, K);
 
@@ -200,9 +205,9 @@ void matMulGpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
 int main()
 {
     //Declare host variables
-    int M = 32;
-    int N = 128;
-    int K = 64;
+    int M = 8162;
+    int N = 6144;
+    int K = 4092;
 
     float** h_A = assignHostSpace(M, N);
     float** h_B = assignHostSpace(N, K);
@@ -214,11 +219,11 @@ int main()
     assignHostValues(h_B, N, K);
 
     //Call CPU and GPU
-    matMulCpu(h_A, h_B, h_C_cpu, M, N, K);
+    //matMulCpu(h_A, h_B, h_C_cpu, M, N, K);
     matMulGpu(h_A, h_B, h_C_gpu, M, N, K);
 
     //compare
-    mismatch2D(h_C_cpu, h_C_gpu, M, K);
+    //mismatch2D(h_C_cpu, h_C_gpu, M, K);
 
     return 0;
 }
