@@ -120,16 +120,16 @@ namespace warpKernels
     {
         float4 tmp;
 
-        for(int offset = 0; offset<BM; offset+=rowStrideA)
+        for(int offset = 0; offset<BM; offset+=rowStrideA) //RowstrideA = BM in our cases as data exactly fits.
         {
-            tmp = reinterpret_cast<float4*>(&d_A[(innerRowA + offset)*K + 4*innerColA])[0];
-            MdS[(4*innerColA + 0)*BM + innerRowA + offset] = tmp.x;
-            MdS[(4*innerColA + 1)*BM + innerRowA + offset] = tmp.y; 
-            MdS[(4*innerColA + 2)*BM + innerRowA + offset] = tmp.z; 
+            tmp = reinterpret_cast<float4*>(&d_A[(innerRowA + offset)*K + 4*innerColA])[0]; 
+            MdS[(4*innerColA + 0)*BM + innerRowA + offset] = tmp.x; //We are doing transpose here. It is needed as BK is only 16, No shmem coalescing.
+            MdS[(4*innerColA + 1)*BM + innerRowA + offset] = tmp.y; //Swap row and col places, BK --> BN. Also switch while accessing it. Thats it.
+            MdS[(4*innerColA + 2)*BM + innerRowA + offset] = tmp.z; // '/' operator tx actually makes subsequent tx access same row/location.
             MdS[(4*innerColA + 3)*BM + innerRowA + offset] = tmp.w;  
         }
         
-        for(int offset = 0; offset<BK; offset+=rowStrideB)
+        for(int offset = 0; offset<BK; offset+=rowStrideB) //RowstrideB = BK in our cases as data exactly fits.
             reinterpret_cast<float4*>(&NdS[(innerRowB+offset)*BN + 4*innerColB])[0] = reinterpret_cast<float4*>(&d_B[(innerRowB+offset)*N + 4*innerColB])[0];
     }
 
@@ -143,8 +143,8 @@ namespace warpKernels
             {
                 for(int idxM=0; idxM<TM; idxM++)
                 {
-                    tmpA[witerM*TM + idxM] = MdS[idxK*BM + (warpRow*WM + witerM*WSUBM + subWarpRowIdx*TM+ idxM)];
-                }
+                    tmpA[witerM*TM + idxM] = MdS[idxK*BM + (warpRow*WM + witerM*WSUBM + subWarpRowIdx*TM+ idxM)]; //BM = 64, WM = 32, WSUBM =16, TM = 4. New tx at evry TM and every WN totally new
+                }//Exchange row and col as we transposed.
             } 
             
             for(int witerN=0; witerN<WNITERS; witerN++)
@@ -173,32 +173,34 @@ namespace warpKernels
 __global__ void __launch_bounds__((BM*BN)/(TM*TN),1) matMulKernel(float* d_A, float* d_B, float* d_C, int M, int K, int N)
 {
 
-    const int innerRowA = threadIdx.x/(BK/4);
-    const int innerColA = threadIdx.x%(BK/4);
-    constexpr int rowStrideA = TX_PER_BLOCK/(BK/4);
+    const int innerRowA = threadIdx.x/(BK/4); //When we vectorize we do the Col Name/4 as float4
+    const int innerColA = threadIdx.x%(BK/4); //Continue for all exp
+    constexpr int rowStrideA = TX_PER_BLOCK/(BK/4); //This is for BK*BN > (4*Thread). We read in the BK(Col) globally. And add it to row here. Hence row stride
 
-    const int innerRowB = threadIdx.x/(BN/4);
+    const int innerRowB = threadIdx.x/(BN/4); //Same explation as 176
     const int innerColB = threadIdx.x%(BN/4);
-    constexpr int rowStrideB = TX_PER_BLOCK/(BN/4);
+    constexpr int rowStrideB = TX_PER_BLOCK/(BN/4); //Comparing it to BK (the row index as jump)
 
 
-    const int outputsPerBlock = BM*BN;
+    const int outputsPerBlock = BM*BN; 
     const int outputsPerTile = TM*TN;
 
-    assert(outputsPerBlock/outputsPerTile == blockDim.x);
+    assert(outputsPerBlock/outputsPerTile == blockDim.x); //As that many tx run in parallel during dot product phase. We need to compute.
 
-    const int warpIdx = threadIdx.x/WARPSIZE;
-    const int warpRow = warpIdx/(BN/WN);
+    const int warpIdx = threadIdx.x/WARPSIZE; //Convert threadIdx to Warp
+    const int warpRow = warpIdx/(BN/WN); //It spans BN with WN jump (It is between BN and WN width pixels)
     const int warpCol = warpIdx%(BN/WN);
 
-    const int subWarpIdx = threadIdx.x%WARPSIZE;
-    const int subWarpRowIdx = subWarpIdx/(WSUBN/TN);
+    const int subWarpIdx = threadIdx.x%WARPSIZE; //This is with in Warp
+    const int subWarpRowIdx = subWarpIdx/(WSUBN/TN); //WN is divided into WSUBNs. This spans WSUBN jumping TN.
     const int subWarpColIdx = subWarpIdx%(WSUBN/TN);
 
 
-    d_A += blockIdx.y*BM*K;
-    d_B += blockIdx.x*BN;
-    d_C += ((blockIdx.y*BM + warpRow*WM)*N  + (blockIdx.x*BN + warpCol*WN));
+    d_A += blockIdx.y*BM*K; //Reading the Global input array is same
+    d_B += blockIdx.x*BN; 
+    d_C += ((blockIdx.y*BM + warpRow*WM)*N  + (blockIdx.x*BN + warpCol*WN)); //Output, each thread write a sub warp tile. Here we go the warp inside block.
+    /*So, we are splitting BN into to 2 levels, 1. WNs and 2. Each WN into WSUBN. Then comes TN. Adjacent index in TN is sequentioal (same thread serially).
+    Then the thread will jump WSUBN pixels (or WMITERS++). So, each WSUBM will have multiple TM. So, we will need WSUBN/TN tx. Then we do WNIRES++. BN/WN*WSUBN/TN threads total in Col *Row threads*/
 
     extern __shared__ float shMem[];
     
@@ -230,8 +232,8 @@ __global__ void __launch_bounds__((BM*BN)/(TM*TN),1) matMulKernel(float* d_A, fl
                 for(int idxN=0; idxN<TN; idxN+=4)
                 {
                     reinterpret_cast<float4*>(&d_C[(witerM*WSUBM + subWarpRowIdx*TM + idxM)*N + (witerN*WSUBN + subWarpColIdx*TN + idxN)])[0] = 
-                                    reinterpret_cast<float4*>(&pSum[(witerM*TM + idxM)*WNITERS*TN + (witerN*TN + idxN)])[0];
-                }
+                                    reinterpret_cast<float4*>(&pSum[(witerM*TM + idxM)*WNITERS*TN + (witerN*TN + idxN)])[0]; //C is already shifted by necessary block and Warp. Now subWarp too.
+                }//Same expression as in Psum dot product. Just split across different levels.
             }
         }
     }    
