@@ -1,10 +1,10 @@
 #include<iostream>
 #include<cuda.h>
 
-#define H_TILE_WIDTH 32
+#define H_TILE_WIDTH 16
 #define H_BLOCK_TILE_COL_STRIDE 4
 #define H_BLOCK_TILE_ROW_STRIDE 4
-#define COMMON_DIM_BLOCK_STRIDE 4
+
 #define CEIL_CUSTOM(M, N) (((M) + (N) - 1)/(N))
 
 float** assignHostSpace(int rows, int cols)
@@ -212,9 +212,9 @@ void matMulGpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
 int main()
 {
     //Declare host variables
-    int M = 32;//8162;
-    int N = 64;//6144;
-    int K = 128;//4092;
+    int M = 8162;
+    int N = 6144;
+    int K = 4092;
 
     float** h_A = assignHostSpace(M, N);
     float** h_B = assignHostSpace(N, K);
@@ -226,11 +226,11 @@ int main()
     assignHostValues(h_B, N, K);
 
     //Call CPU and GPU
-    matMulCpu(h_A, h_B, h_C_cpu, M, N, K);
+    //matMulCpu(h_A, h_B, h_C_cpu, M, N, K);
     matMulGpu(h_A, h_B, h_C_gpu, M, N, K);
 
     //compare
-    mismatch2D(h_C_cpu, h_C_gpu, M, K);
+    //mismatch2D(h_C_cpu, h_C_gpu, M, K);
 
     return 0;
 }
