@@ -137,16 +137,13 @@ __global__ void softmaxKernel(float* d_A, float* d_C, int M, int N)
     //Declared Shared mem
     __shared__ float shMem[BM*BN];
     __shared__ float pMax[BM*BN];
-    __shared__ float pSum[BM*BN];
     __shared__ float pNorm[BM*BN];
 
     __shared__ float gMax[BM]; 
-    __shared__ float gSum[BM]; 
     __shared__ float gNorm[BM];
     if(threadIdx.x < BM)
     {
         gMax[threadIdx.x] = -INFINITY;
-        gSum[threadIdx.x] = 0.0;
         gNorm[threadIdx.x] = 0.0;
     }
     __syncthreads();
@@ -170,7 +167,6 @@ __global__ void softmaxKernel(float* d_A, float* d_C, int M, int N)
         shMem[idxRow*BN + idxCol] = val;
         pMax[idxRow*BN + idxCol] = val;
         pNorm[idxRow*BN + idxCol] = 1.0;
-        pSum[idxRow*BN + idxCol] = 1.0;
 
         __syncthreads();
         //Now do Reduction
@@ -188,8 +184,7 @@ __global__ void softmaxKernel(float* d_A, float* d_C, int M, int N)
                 {
                     pNorm[idxRow*BN + idxCol+stride] *= expf(pMax[idxRow*BN + idxCol+stride] - pMax[idxRow*BN + idxCol]);
                 }
-                pSum[idxRow*BN + idxCol] = pNorm[idxRow*BN + idxCol] + pNorm[idxRow*BN + idxCol+stride];
-                pNorm[idxRow*BN + idxCol] = pSum[idxRow*BN + idxCol];
+                pNorm[idxRow*BN + idxCol] += pNorm[idxRow*BN + idxCol+stride];
             }
         }
         __syncthreads();
@@ -205,8 +200,7 @@ __global__ void softmaxKernel(float* d_A, float* d_C, int M, int N)
             {
                 pNorm[idxRow*BN] = pNorm[idxRow*BN]*expf(pMax[idxRow*BN]-gMax[idxRow]);
             }
-            gSum[idxRow] = gNorm[idxRow] + pNorm[idxRow*BN];
-            gNorm[idxRow] = gSum[idxRow];
+            gNorm[idxRow] += pNorm[idxRow*BN];
         }
         __syncthreads();
         //House keeping
@@ -226,7 +220,7 @@ __global__ void softmaxKernel(float* d_A, float* d_C, int M, int N)
     for(int idxN = 0; idxN<N; idxN+=BN)
     {
         float val = d_A[idxRow*N + idxCol];
-        d_C[idxRow*N + idxCol] = expf(val - gMax[idxRow])/gSum[idxRow];
+        d_C[idxRow*N + idxCol] = expf(val - gMax[idxRow])/gNorm[idxRow];
         d_C += BN;
         d_A += BN;
     }
