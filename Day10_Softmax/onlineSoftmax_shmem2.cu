@@ -7,7 +7,7 @@
 using namespace std;
 
 #define PRINT_FLAG false
-#define TX_PER_BLOCK 256
+#define TX_PER_BLOCK 1024
 
 #define CEIL_CUSTOM(M,N) ((M) + (N) - 1)/(N)
 #define CUDA_CHECK(call) \
@@ -34,8 +34,8 @@ float** assignHostSpace(int rows, int cols)
 
 void assignHostValues(float** hostArr, int rows, int cols)
 {
-    mt19937 gen(2025);  // fixed seed for determinism
-    uniform_real_distribution<float> dist(-10.0f, 10.0f);
+    mt19937 gen(2026);  // fixed seed for determinism
+    uniform_real_distribution<float> dist(-0.5f, 0.5f);
     
     for(int i=0;i<rows;i++)
     {
@@ -131,81 +131,66 @@ void convert_1D_to_2D(float* inpArr, float** outArr, int rows, int cols)
 }
 
 
-template <const int BM, const int BN>
-__global__ void softmaxKernel(float* d_A, float* d_C, int M, int N)
+__global__ void softmaxKernel(float* __restrict__ d_A, float* __restrict__ d_C, int M, int N)
 {
-    //Declared Shared mem
-    __shared__ float pMax[BM*BN];
-    __shared__ float pNorm[BM*BN];
+    if(blockIdx.x > M) return;
+    //Declare shMem to collate results adter each local run
+    __shared__ float shMem[TX_PER_BLOCK];
 
-    __shared__ float gMax[BM]; 
-    __shared__ float gNorm[BM];
-    if(threadIdx.x < BM)
+    float localMax = -INFINITY;
+    float localNorm = 0.0f;
+    //start address
+    d_A += blockIdx.x*N;
+    d_C += blockIdx.x*N;
+
+    const int tid = threadIdx.x;
+    //Collate local results 
+    for(int idxN = tid; idxN<N; idxN += blockDim.x)
     {
-        gMax[threadIdx.x] = -INFINITY;
-        gNorm[threadIdx.x] = 0.0;
+        float val = d_A[idxN];
+        if(val > localMax)
+        {
+            localNorm *= expf(localMax - val);
+            localMax = val;
+        }
+        localNorm += expf(val - localMax);
     }
+
+    shMem[tid] = localMax;
+    __syncthreads();
+    //collate shMem results
+    for(int level=blockDim.x/2; level>=1; level /= 2)
+    {
+        int stride = level;
+        if(tid<level)
+        {
+            shMem[tid] = max(shMem[tid], shMem[tid+stride]);
+        }
+        __syncthreads();
+    }
+
+    float gMax = shMem[0];
+    shMem[tid] = localNorm*expf(localMax - gMax);
     __syncthreads();
 
-    //Move the globalMem address across rows
-    const int blockRows = blockIdx.x * BM;
-    if(blockRows > M) return;
-
-    d_A += blockRows * N; 
-    d_C += blockRows * N;
-
-    //BN*BM Threads
-    const int idxRow = threadIdx.x / BN; //0 to (BM - 1)
-    const int idxCol = threadIdx.x % BN; //0 to BN-1
-
-
-    for(int idxN = 0; idxN<N; idxN+=BN)
+    for(int level=blockDim.x/2; level>=1; level /= 2)
     {
-        //Load shMem Populate pSum, pNorm, pGmax
-        float val = d_A[idxRow*N + idxCol];
-        pMax[idxRow*BN + idxCol] = val;
-        pNorm[idxRow*BN + idxCol] = 1.0;
+        int stride = level;
+        if(tid<level)
+        {
+            shMem[tid] +=  shMem[tid + stride];
+        }
+        __syncthreads();
+    }
+    
+    float gSum = shMem[0];
+    __syncthreads();
 
-        __syncthreads();
-        //Now do Reduction
-        #pragma unroll
-        for(int idxLevel = BN/2; idxLevel>=1; idxLevel/=2)
-        {
-            int stride = idxLevel;
-            if(idxCol < idxLevel)
-            {
-                if(pMax[idxRow*BN + idxCol] < pMax[idxRow*BN + idxCol+stride])
-                {
-                    pNorm[idxRow*BN + idxCol] *= expf(pMax[idxRow*BN + idxCol] - pMax[idxRow*BN + idxCol+stride]);
-                    pMax[idxRow*BN + idxCol] = pMax[idxRow*BN + idxCol+stride];
-                }
-                else
-                {
-                    pNorm[idxRow*BN + idxCol+stride] *= expf(pMax[idxRow*BN + idxCol+stride] - pMax[idxRow*BN + idxCol]);
-                }
-                pNorm[idxRow*BN + idxCol] += pNorm[idxRow*BN + idxCol+stride];
-            }
-            __syncthreads();
-        }
-        __syncthreads();
-        //Collate results to global
-        if(idxCol == 0)
-        {
-            if(pMax[idxRow*BN] > gMax[idxRow])
-            {
-                gNorm[idxRow] = gNorm[idxRow]*expf(gMax[idxRow]-pMax[idxRow*BN]);
-                gMax[idxRow] = pMax[idxRow*BN];
-            }
-            else
-            {
-                pNorm[idxRow*BN] = pNorm[idxRow*BN]*expf(pMax[idxRow*BN]-gMax[idxRow]);
-            }
-            gNorm[idxRow] += pNorm[idxRow*BN];
-        }
-        __syncthreads();
-        //House keeping
-        d_A += BN;
-        /*
+    for(int idxN = tid; idxN<N; idxN += blockDim.x)
+    {
+        d_C[idxN] = expf(d_A[idxN] - gMax)/gSum;
+    }
+    /*
         float val = shMem[idxRow*BN + idxCol];
         if(val > globalMax)
         {
@@ -214,16 +199,7 @@ __global__ void softmaxKernel(float* d_A, float* d_C, int M, int N)
         }
         sum = norm + expf(val - globalMax);
         norm = sum;
-        */
-    }
-    d_A -= N; 
-    for(int idxN = 0; idxN<N; idxN+=BN)
-    {
-        float val = d_A[idxRow*N + idxCol];
-        d_C[idxRow*N + idxCol] = expf(val - gMax[idxRow])/gNorm[idxRow];
-        d_C += BN;
-        d_A += BN;
-    }
+    */
 
 }
 
@@ -231,9 +207,7 @@ __global__ void softmaxKernel(float* d_A, float* d_C, int M, int N)
 void softmaxGpu(float** h_A, float** h_C, int M, int N)
 {
 
-    const int BM = 4;
-    const int BN = 64;
-    assert(BM*BN == TX_PER_BLOCK);
+
     //Prep Host values
     float* h_A_1D = convert_2D_to_1D(h_A, M, N);
 
@@ -254,10 +228,10 @@ void softmaxGpu(float** h_A, float** h_C, int M, int N)
 
     dim3 blockSize(TX_PER_BLOCK,1,1);
 
-    dim3 gridSize(CEIL_CUSTOM(M,BM),1, 1);
+    dim3 gridSize(M, 1, 1);
     //ize_t shMemSize = (BM*BK)*sizeof(float);
 
-    softmaxKernel<BM, BN><<<gridSize, blockSize>>>(d_A, d_C, M, N);
+    softmaxKernel<<<gridSize, blockSize>>>(d_A, d_C, M, N);
     cudaDeviceSynchronize();
 
     //Copy values back
@@ -279,8 +253,8 @@ int main()
     int M, N;
     if(printFlag)
     {
-        M = 4;
-        N = 8;
+        M = 1;
+        N = 4;
     }
     else
     {
@@ -295,8 +269,6 @@ int main()
 
     //Assign values
     assignHostValues(h_A, M, N);
-    
-
     //Call CPU and GPU
     //if(printFlag)
     //{
