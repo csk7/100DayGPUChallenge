@@ -9,7 +9,6 @@ using namespace std;
 
 #define PRINT_FLAG false
 #define TX_PER_BLOCK 1024
-#define WARPSIZE 32
 
 #define CEIL_CUSTOM(M,N) ((M) + (N) - 1)/(N)
 #define CUDA_CHECK(call) \
@@ -147,18 +146,30 @@ __global__ void softmaxKernel(float* __restrict__ d_A, float* __restrict__ d_C, 
 
     const int tid = threadIdx.x;
     
-
     //Collate local results 
-    for(int idxN = tid; idxN<N; idxN += blockDim.x)
+    for(int idxN = tid; idxN<(N/4); idxN += blockDim.x)
     {
-        float val = d_A[idxN];
-        if(val > localMax)
+        float4 val = reinterpret_cast<float4*>(&d_A[4*idxN])[0];
+        float vectorMax = -INFINITY;
+        float vectorNorm = 0.0;
+        
+        vectorMax = fmaxf(vectorMax, val.x);
+        vectorMax = fmaxf(vectorMax, val.y);
+        vectorMax = fmaxf(vectorMax, val.z);
+        vectorMax = fmaxf(vectorMax, val.w);
+
+        if(vectorMax > localMax)
         {
-            localNorm *= expf(localMax - val);
-            localMax = val;
+            localNorm *= expf(localMax - vectorMax);
+            localMax = vectorMax;   
         }
-        localNorm += expf(val - localMax);
+        vectorNorm += expf(val.x - localMax);
+        vectorNorm += expf(val.y - localMax);
+        vectorNorm += expf(val.z - localMax);
+        vectorNorm += expf(val.w - localMax);
+        localNorm+=vectorNorm;
     }
+    __syncthreads();
     //collate shMem results for globalMax
     float val = localMax;
     
@@ -173,11 +184,19 @@ __global__ void softmaxKernel(float* __restrict__ d_A, float* __restrict__ d_C, 
     float gSum = shMem[0];
     __syncthreads();
 
-    for(int idxN = tid; idxN<N; idxN += blockDim.x)
+    for(int idxN = tid; idxN<N/4; idxN += blockDim.x)
     {
-        d_C[idxN] = expf(d_A[idxN] - gMax)/gSum;
+        float4 result, temp;
+        temp = reinterpret_cast<float4*>(&d_A[4*idxN])[0];
+        result.x = expf(temp.x - gMax)/gSum;
+        result.y = expf(temp.y - gMax)/gSum;
+        result.z = expf(temp.z - gMax)/gSum;
+        result.w = expf(temp.w - gMax)/gSum;
+
+        reinterpret_cast<float4*>(&d_C[4*idxN])[0] = result;
     }
 
+ 
 }
 
 
