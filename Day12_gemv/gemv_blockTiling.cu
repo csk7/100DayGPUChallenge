@@ -1,12 +1,11 @@
 #include<cuda.h>
 #include<iostream>
-#define TX_PER_BLOCK 256 //(BM*BN)/(TM) == TX_PER_BLOCK
+#define TX_PER_BLOCK 4 //(BM*BN)/(TM) == TX_PER_BLOCK
 
-#define BK 16
-#define BN 64
-#define BM 64
+#define BN 4
+#define BM 1
 
-#define TM 4 //N_TILES in Y dir
+#define TM 1 //N_TILES in Y dir
 
 float** assignHostSpace2D(int rows, int cols)
 {
@@ -80,6 +79,49 @@ void mismatch1D(float* cpuArr, float* gpuArr, int row)
     }
     if(flag == 1)
         printf("Success \n");
+}
+
+__global__ void __launch_bounds__((BM*BN)/(TM),1) matMulKernel(float* d_A, float* d_B, float* d_C, int M, int K, int N)
+{
+     
+    if(blockIdx.x*BM > M) return;
+
+    d_A += blockIdx.x*BM*N;
+    d_C += blockIdx.x*BM;
+    
+    const int idxRow = threadIdx.x / BN;
+    const int idxCol = threadIdx.x % BN;
+
+    float pVal[TM] = {0.0};
+
+    for(int idxN = idxCol; idxN<N; idxN+=BN)
+    {
+        float regB = d_B[idxN];
+        for(int idxTile=0; idxTile<TM; idxTile++)
+        {
+            pVal[idxTile] += d_A[idxRow*N + idxN] * regB;
+
+            d_A += (BM/TM)*N;
+        }
+        d_A -= BM*N;
+        d_A += BN;
+        d_B += BN;
+    }
+
+    __syncthreads();
+    for(int idxTile=0; idxTile<TM; idxTile++)
+    {
+        pVal[idxTile] = warpSum(pVal[idxTile]);
+    }
+    
+    if(idxCol == 0)
+    {
+        for(int idxTile=0; idxTile<TM; idxTile++)
+        {
+            d_C[idxRow] = pVal[idxTile];
+            d_C += (BM/TM);
+        }
+    }
 }
 
 void gemvGpu(float** h_A, float* h_B, float* h_C, int M, int N)
