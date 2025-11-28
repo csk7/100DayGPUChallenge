@@ -9,6 +9,7 @@ using namespace std;
 
 #define PRINT_FLAG false
 #define TX_PER_BLOCK 1024
+#define WARPSIZE 32
 
 #define CEIL_CUSTOM(M,N) ((M) + (N) - 1)/(N)
 #define CUDA_CHECK(call) \
@@ -136,7 +137,7 @@ __global__ void softmaxKernel(float* __restrict__ d_A, float* __restrict__ d_C, 
 {
     if(blockIdx.x > M) return;
     //Declare shMem to collate results adter each local run
-    __shared__ float shMem[TX_PER_BLOCK];
+    __shared__ float shMem[TX_PER_BLOCK/WARPSIZE];
 
     float localMax = -INFINITY;
     float localNorm = 0.0f;
