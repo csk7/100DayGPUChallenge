@@ -1,11 +1,20 @@
 #include<cuda.h>
 #include<iostream>
-#define TX_PER_BLOCK 4 //(BM*BN)/(TM) == TX_PER_BLOCK
+#define TX_PER_BLOCK 256 //(BM*BN)/(TM) == TX_PER_BLOCK
+#define WARPSIZE 32 
 
-#define BN 4
-#define BM 1
+#define BN 32
+#define BM 32
 
-#define TM 1 //N_TILES in Y dir
+#define TM 4 //N_TILES in Y dir
+
+#define CEIL_CUSTOM(M, N) (((M) + (N) - 1)/(N))
+#define CUDA_CHECK(call)               \
+    do{                                \
+        cudaError_t err = call;        \
+        if(err != cudaSuccess)         \
+            printf("Error %s at line %d",cudaGetErrorString(err), __LINE__);  \
+    }while(0) 
 
 float** assignHostSpace2D(int rows, int cols)
 {
@@ -36,7 +45,7 @@ void assignHostValues2D(float** hostArr, int rows, int cols)
 float* assignHostSpace1D(int rows)
 {
     float* hostArr;
-    hostArr = new float*[rows];
+    hostArr = new float[rows];
     for(int i=0; i<rows; i++)
     {
         hostArr[i] = 0;
@@ -66,6 +75,20 @@ void gemvCpu(float** h_A, float* h_B, float* h_C, int M, int N)
     }
 }
 
+float* convert_2D_to_1D(float** inpArr, int rows, int cols)
+{
+    float* outArr;
+    outArr = new float[rows*cols];
+    for(int i = 0; i<rows; i++)
+    {
+        for(int j=0; j<cols; j++)
+        {
+            outArr[i*cols + j] = inpArr[i][j];
+        }
+    }
+    return outArr;
+}
+
 void mismatch1D(float* cpuArr, float* gpuArr, int row)
 {
     int flag = 1;
@@ -81,7 +104,30 @@ void mismatch1D(float* cpuArr, float* gpuArr, int row)
         printf("Success \n");
 }
 
-__global__ void __launch_bounds__((BM*BN)/(TM),1) matMulKernel(float* d_A, float* d_B, float* d_C, int M, int K, int N)
+template<typename T, typename Op> 
+__device__ __inline__ T warpReduce(T regVal, Op op)
+{
+    for(int stride = WARPSIZE/2; stride>=1; stride/=2)
+    {
+        regVal = op(regVal, __shfl_down_sync(0xffffffff, regVal, stride));
+    }
+    return regVal;
+}
+
+template<typename T>
+__device__ T __opSum(T inputA, T inputB)
+{
+    return (inputA + inputB);
+}
+
+template<typename T> 
+__device__ T warpSum(T regVal)
+{
+    return warpReduce<float>(regVal, __opSum<T>);
+}
+
+
+__global__ void __launch_bounds__((BM*BN)/(TM),1) gemvKernel(float* d_A, float* d_B, float* d_C, int M, int N)
 {
      
     if(blockIdx.x*BM > M) return;
@@ -96,22 +142,22 @@ __global__ void __launch_bounds__((BM*BN)/(TM),1) matMulKernel(float* d_A, float
 
     for(int idxN = idxCol; idxN<N; idxN+=BN)
     {
-        float regB = d_B[idxN];
+        float regB = d_B[idxCol];
         for(int idxTile=0; idxTile<TM; idxTile++)
         {
             pVal[idxTile] += d_A[idxRow*N + idxN] * regB;
-
             d_A += (BM/TM)*N;
         }
         d_A -= BM*N;
-        d_A += BN;
         d_B += BN;
     }
 
     __syncthreads();
     for(int idxTile=0; idxTile<TM; idxTile++)
     {
+        //printf("Thread (%d) Before Val: %f \n", threadIdx.x, pVal[idxTile]);
         pVal[idxTile] = warpSum(pVal[idxTile]);
+        //printf("Thread (%d) Final Val: %f \n", threadIdx.x, pVal[idxTile]);
     }
     
     if(idxCol == 0)
@@ -138,13 +184,13 @@ void gemvGpu(float** h_A, float* h_B, float* h_C, int M, int N)
     int sizeB = N * sizeof(float);
     int sizeC = M * sizeof(float);
 
-    cudaMalloc((void**)&d_A, sizeA);
-    cudaMalloc((void**)&d_B, sizeB);
+    CUDA_CHECK(cudaMalloc((void**)&d_A, sizeA));
+    CUDA_CHECK(cudaMalloc((void**)&d_B, sizeB));
     CUDA_CHECK(cudaMalloc((void**)&d_C, sizeC));
 
     //Copy values to device
     cudaMemcpy(d_A, h_A_1D, sizeA, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, h_B_1D, sizeB, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B, sizeB, cudaMemcpyHostToDevice);
 
     //Call Kernel
     dim3 blockSize(TX_PER_BLOCK,1,1);
@@ -164,8 +210,8 @@ int main()
 {
 
     //Declare host variables
-    int M = 1;//8162;
-    int N = 4;//4092;
+    int M = 8162;
+    int N = 4092;
 
     float** h_A = assignHostSpace2D(M, N);
     float* h_B = assignHostSpace1D(N);
@@ -181,7 +227,7 @@ int main()
     gemvGpu(h_A, h_B, h_C_gpu, M, N);
 
     //compare
-    mismatch1D(h_C_cpu, h_C_gpu, M, N);
+    mismatch1D(h_C_cpu, h_C_gpu, M);
 
     return 0;
     
