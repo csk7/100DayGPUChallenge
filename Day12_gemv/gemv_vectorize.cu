@@ -5,8 +5,8 @@
 #define TX_PER_BLOCK 256 //(BM*BN)/(TM) == TX_PER_BLOCK
 #define WARPSIZE 32 
 
-#define BN 32
-#define BM 32
+#define BN 256
+#define BM 4
 
 #define TM 4 //N_TILES in Y dir
 
@@ -109,7 +109,7 @@ void mismatch1D(float* cpuArr, float* gpuArr, int row)
 
 __global__ void __launch_bounds__((BM*BN)/(TM),1) gemvKernel(float* d_A, float* d_B, float* d_C, int M, int N)
 {
-     
+    __shared__ float shMem[BM/TM*BN/WARPSIZE];
     if(blockIdx.x*BM > M) return;
 
     d_A += blockIdx.x*BM*N;
@@ -118,33 +118,41 @@ __global__ void __launch_bounds__((BM*BN)/(TM),1) gemvKernel(float* d_A, float* 
     const int idxRow = threadIdx.x / BN;
     const int idxCol = threadIdx.x % BN;
 
+    const int numYBlocks = BM/TM;
+
     float pVal[TM] = {0.0};
 
-    for(int idxN = idxCol; idxN<N; idxN+=BN)
+    for(int idxN = idxCol; idxN<(N/4); idxN+=BN)
     {
-        float regB = d_B[idxCol];
+        float4 regB = reinterpret_cast<float4*>(&d_B[4*idxN])[0];
         for(int idxTile=0; idxTile<TM; idxTile++)
         {
-            pVal[idxTile] += d_A[idxRow*N + idxN] * regB;
-            d_A += (BM/TM)*N;
+            float4 tmpA = reinterpret_cast<float4*>(&d_A[(idxRow*numYBlocks+idxTile)*N + 4*idxN])[0];
+            pVal[idxTile] += (tmpA.x * regB.x + tmpA.y * regB.y + tmpA.z * regB.z + tmpA.w * regB.w);
         }
-        d_A -= BM*N;
-        d_B += BN;
     }
 
     __syncthreads();
     for(int idxTile=0; idxTile<TM; idxTile++)
     {
         //printf("Thread (%d) Before Val: %f \n", threadIdx.x, pVal[idxTile]);
-        pVal[idxTile] = warpSum(pVal[idxTile]);
+        blockSum(pVal[idxTile], &shMem[0], 0.0f, BN);
+        if(idxCol == 0)
+            pVal[idxTile] = shMem[idxRow*BN/WARPSIZE];
         //printf("Thread (%d) Final Val: %f \n", threadIdx.x, pVal[idxTile]);
     }
     
     if(idxCol == 0)
     {
-        for(int idxTile=0; idxTile<TM; idxTile++)
+        for(int idxTile=0; idxTile<TM; idxTile+=4)
         {
-            d_C[idxRow] = pVal[idxTile];
+            float4 tmpC;
+            tmpC.x =  pVal[idxTile];
+            tmpC.y =  pVal[idxTile + 1];
+            tmpC.z =  pVal[idxTile + 2];
+            tmpC.w =  pVal[idxTile + 3];
+
+            reinterpret_cast<float4*>(&d_C[4*idxRow])[0] = tmpC;
             d_C += (BM/TM);
         }
     }
@@ -190,8 +198,8 @@ int main()
 {
 
     //Declare host variables
-    int M = 4096;
-    int N = 8*4096;
+    int M = 8;
+    int N = 2048;
 
     float** h_A = assignHostSpace2D(M, N);
     float* h_B = assignHostSpace1D(N);
@@ -203,11 +211,11 @@ int main()
     assignHostValues1D(h_B, N);
 
     //Call CPU and GPU
-    //gemvCpu(h_A, h_B, h_C_cpu, M, N);
+    gemvCpu(h_A, h_B, h_C_cpu, M, N);
     gemvGpu(h_A, h_B, h_C_gpu, M, N);
 
     //compare
-    //mismatch1D(h_C_cpu, h_C_gpu, M);
+    mismatch1D(h_C_cpu, h_C_gpu, M);
 
     return 0;
     

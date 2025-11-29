@@ -5,8 +5,8 @@
 #define TX_PER_BLOCK 256 //(BM*BN)/(TM) == TX_PER_BLOCK
 #define WARPSIZE 32 
 
-#define BN 32
-#define BM 32
+#define BN 64
+#define BM 16
 
 #define TM 4 //N_TILES in Y dir
 
@@ -109,7 +109,7 @@ void mismatch1D(float* cpuArr, float* gpuArr, int row)
 
 __global__ void __launch_bounds__((BM*BN)/(TM),1) gemvKernel(float* d_A, float* d_B, float* d_C, int M, int N)
 {
-     
+    __shared__ float shMem[BM/TM*BN/WARPSIZE];
     if(blockIdx.x*BM > M) return;
 
     d_A += blockIdx.x*BM*N;
@@ -136,7 +136,9 @@ __global__ void __launch_bounds__((BM*BN)/(TM),1) gemvKernel(float* d_A, float* 
     for(int idxTile=0; idxTile<TM; idxTile++)
     {
         //printf("Thread (%d) Before Val: %f \n", threadIdx.x, pVal[idxTile]);
-        pVal[idxTile] = warpSum(pVal[idxTile]);
+        blockSum(pVal[idxTile], &shMem[0], 0.0f, BN);
+        if(idxCol == 0)
+            pVal[idxTile] = shMem[idxRow*BN/WARPSIZE];
         //printf("Thread (%d) Final Val: %f \n", threadIdx.x, pVal[idxTile]);
     }
     
@@ -190,8 +192,8 @@ int main()
 {
 
     //Declare host variables
-    int M = 4096;
-    int N = 8*4096;
+    int M = 4;
+    int N = 128;
 
     float** h_A = assignHostSpace2D(M, N);
     float* h_B = assignHostSpace1D(N);
@@ -203,11 +205,11 @@ int main()
     assignHostValues1D(h_B, N);
 
     //Call CPU and GPU
-    //gemvCpu(h_A, h_B, h_C_cpu, M, N);
+    gemvCpu(h_A, h_B, h_C_cpu, M, N);
     gemvGpu(h_A, h_B, h_C_gpu, M, N);
 
     //compare
-    //mismatch1D(h_C_cpu, h_C_gpu, M);
+    mismatch1D(h_C_cpu, h_C_gpu, M);
 
     return 0;
     
