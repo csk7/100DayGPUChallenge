@@ -120,9 +120,9 @@ __global__ void __launch_bounds__((BM*BN)/(TM*TN),1) matMulKernel(float* d_A, fl
 
 
     const int outputsPerBlock = BM*BN;
-    const int outputsPerTile = TM*TN;
+    const int outputsPerThread = TM*TN;
 
-    assert(outputsPerBlock/outputsPerTile == blockDim.x);
+    assert(outputsPerBlock/outputsPerThread == blockDim.x);
 
     const int idxRow = threadIdx.x/(BN/TN);
     const int idxCol = threadIdx.x%(BN/TN);
