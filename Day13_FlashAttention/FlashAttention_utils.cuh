@@ -12,7 +12,7 @@
 #define CEIL_CUSTOM(M, N) (((M) + (N) - 1)/(N))
 
 
-template<const int BM, const int BN>
+template<const int BN>
 __device__ void load_K_V(float* K, float* V, float* shK_T, float* shV, int N, int d)
 {
     const int idxRow = threadIdx.x/d;
@@ -26,9 +26,32 @@ __device__ void load_K_V(float* K, float* V, float* shK_T, float* shV, int N, in
     }
 }
 
+template<const int BM>
+__device__ void load_O(float* O, float* shO, int d)
+{
+    const int idxRow = threadIdx.x/d;
+    const int idxCol = threadIdx.x%d;
+    const int stride = blockDim.x/d;
+
+    for(int i=0; i<BM; i+=stride)
+    {
+        shO[(idxRow + i)*d + idxCol] =  O[(idxRow + i)*d + idxCol];
+    }
+}
+
+template<const int BM>
+__device__ void load_L_i_M_i(float* shM_i, float* shL_i, float* m, float* l)
+{
+    assert(BM <= blockDim.x)
+    if(threadIdx.x < BM)
+    {
+        shL_i[threadIdx.x] = l[threadIdx.x];
+        shM_i[threadIdx.x] = m[threadIdx.x];
+    }
+}
 
 template<const int BM, const int BN, const int TM, const int TN>
-__device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ loadQ_matMulS(float* Q, float* shQ, float* shS, int N, int d)
+__device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ loadQ_matMulS(float* Q, float* shQ, float* shS, int d)
 {
     assert(BM*BN/(TM*TN) == blockDim.x)
     //To store to shMem
@@ -172,29 +195,16 @@ __device__ void calculate_Mnew_i_Lnew_i(float* shM_i, float* shL_i, float* shM_i
 
 //Step12
 template<const int BM, const int BN, const int BK, const int TM, const int TN>
-__device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ loadV_matMulPV_Update_O(float* V, float* shV, float* shP, float* O, \
-                                                                                    float* shO, float* shM_ij, float* shM_New_i, int N, int d)
+__device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ matMulPV_Update_O(float* shV, float* shP, float* shO, \
+                                                        float* shM_ij, float* shM_New_i, float* shM_i, float* shL_New_i, float* shL_i, int N, int d)
 {
     assert(BM*BN/(TM*TN) == blockDim.x)
-    //To store to shMem
-    const int idxRow = threadIdx.x/d;
-    const int idxCol = threadIdx.x%d;
-    const int stride = blockDim.x/d;
     //To do dot product
     const int dotIdxRow = threadIdx.x/(BN/TN);
     const int dotIdxCol = threadIdx.x%(BN/TN);
     const int strideCol = blockDim.x/(BN/TN);
     const int strideRow = blockDim.x/(BM/TM);
 
-    for(int i=0; i<BK; i+=stride)
-    {
-        shV[(idxRow + i)*BN + idxCol] = V[(idxRow + i)*d + idxCol];
-    }
-    for(int i=0; i<BM; i+=stride)
-    {
-        shO[(idxRow + i)*BN + idxCol] = O[(idxRow + i)*d + idxCol];
-    }
-    __syncthreads();
     float regA[TM];
     float regB[TN];
     float pSum[TM][TN];
@@ -251,5 +261,18 @@ __device__ void copy_L_i_M_i(float* shM_i, float* shL_i, float* shM_New_i, float
     {
         shL_i[threadIdx.x] = shL_New_i[threadIdx.x];
         shM_i[threadIdx.x] = shM_New_i[threadIdx.x];
+    }
+}
+
+template<const int BM>
+__device__ void write_O(float* O, float* shO, int d)
+{
+    const int idxRow = threadIdx.x/d;
+    const int idxCol = threadIdx.x%d;
+    const int stride = blockDim.x/d;
+
+    for(int i=0; i<BM; i+=stride)
+    {
+        O[(idxRow + i)*d + idxCol] =  shO[(idxRow + i)*d + idxCol];
     }
 }
