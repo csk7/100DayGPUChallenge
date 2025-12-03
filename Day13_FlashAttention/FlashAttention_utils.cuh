@@ -172,7 +172,7 @@ __device__ void calculate_Mnew_i_Lnew_i(float* shM_i, float* shL_i, float* shM_i
 
 //Step12
 template<const int BM, const int BN, const int BK, const int TM, const int TN>
-__device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ loadV_matMulPV(float* V, float* shV, float* shP, float* O, \
+__device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ loadV_matMulPV_Update_O(float* V, float* shV, float* shP, float* O, \
                                                                                     float* shO, float* shM_ij, float* shM_New_i, int N, int d)
 {
     assert(BM*BN/(TM*TN) == blockDim.x)
@@ -189,6 +189,10 @@ __device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ loadV_matMulPV(f
     for(int i=0; i<BK; i+=stride)
     {
         shV[(idxRow + i)*BN + idxCol] = V[(idxRow + i)*d + idxCol];
+    }
+    for(int i=0; i<BM; i+=stride)
+    {
+        shO[(idxRow + i)*BN + idxCol] = O[(idxRow + i)*d + idxCol];
     }
     __syncthreads();
     float regA[TM];
@@ -224,18 +228,28 @@ __device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ loadV_matMulPV(f
     {
         //Load all M, and all L to registers
         regM_New_i[i] = shM_New_i[i*strideRow + dotIdxRow];
-        regM_i[i]
+        regM_i[i] = shM_i[i*strideRow + dotIdxRow];
+        regM_ij[i] = shM_ij[i*strideRow + dotIdxRow];
+
+        regL_New_i[i] = shL_New_i[i*strideRow + dotIdxRow];
+        regL_i[i] = shL_i[i*strideRow + dotIdxRow];
 
         for(int j=0; j<TN; j++)
         {
-            //Load O to shO;
-
-            //Load 
-            pSum[i][j] *= 
+            shO[(dotIdxRow + i*strideRow)*BN + (dotIdxCol + j*strideCol)] = ((regL_i[i]*exp(regM_i[i] - regM_New_i[i])*shO[(dotIdxRow + i*strideRow)*BN + (dotIdxCol + j*strideCol)])
+                                                        + (exp(regM_ij[i] - regM_New_i[i]) * pSum[i][j]))/regL_New_i[i]; 
 
         }
     }
+}
 
-
-    
+template<const int BM>
+__device__ void copy_L_i_M_i(float* shM_i, float* shL_i, float* shM_New_i, float* shL_New_i)
+{
+    assert(BM <= blockDim.x)
+    if(threadIdx.x < BM)
+    {
+        shL_i[threadIdx.x] = shL_New_i[threadIdx.x];
+        shM_i[threadIdx.x] = shM_New_i[threadIdx.x];
+    }
 }
