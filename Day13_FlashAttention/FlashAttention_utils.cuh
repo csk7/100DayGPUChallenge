@@ -28,7 +28,7 @@ __device__ void load_K_V(float* K, float* V, float* shK_T, float* shV, int N, in
 
 
 template<const int BM, const int BN, const int TM, const int TN>
-__device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ loadQ_matMulS(float* Q, float* shQ, float* shK_T, float** shS, int N, int d)
+__device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ loadQ_matMulS(float* Q, float* shQ, float* shS, int N, int d)
 {
     assert(BM*BN/(TM*TN) == blockDim.x)
     //To store to shMem
@@ -151,16 +151,91 @@ __device__ void rowMax_calculateP_rowSum(float* shS_P, float* shM_ij, float* shL
     
 }
 
-template<const int BM, const int WARPSIZE=32>
-__device__ void calculate_Mnew_i_Lnew_i(float* shM_i, float* shL_i, float* shM_ij, float* shL_ij)
+//Step 11
+template<const int BM>
+__device__ void calculate_Mnew_i_Lnew_i(float* shM_i, float* shL_i, float* shM_ij, float* shM_New_i, float* shL_New_i, float* shL_ij)
 {
-    assert(BM < blockDim.x)
+    assert(BM <= blockDim.x)
     if(threadIdx.x < BM)
     {
-        float valM_i  = shM_i[idxRow + i*stride];
+        float valM_i  = shM_i[threadIdx.x];
+        float valM_ij  = shM_ij[threadIdx.x];
         float valM_New_i = max(valM_ij, valM_i);
 
-        float valL_i  = shL_i[idxRow + i*stride];
-        float valL_New_i = exp(valM_i, valM_New_i)*valL_i + exp(valM_ij, valM_New_i)*valL_ij;
+        shM_New_i[threadIdx.x] = valM_New_i;
+
+        float valL_i = shL_i[threadIdx.x];
+        float valL_ij = shL_ij[threadIdx.x];
+        shL_New_i[threadIdx.x] = exp(valM_i, valM_New_i)*valL_i + exp(valM_ij, valM_New_i)*valL_ij;
     }
+}
+
+//Step12
+template<const int BM, const int BN, const int BK, const int TM, const int TN>
+__device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ loadV_matMulPV(float* V, float* shV, float* shP, float* O, \
+                                                                                    float* shO, float* shM_ij, float* shM_New_i, int N, int d)
+{
+    assert(BM*BN/(TM*TN) == blockDim.x)
+    //To store to shMem
+    const int idxRow = threadIdx.x/d;
+    const int idxCol = threadIdx.x%d;
+    const int stride = blockDim.x/d;
+    //To do dot product
+    const int dotIdxRow = threadIdx.x/(BN/TN);
+    const int dotIdxCol = threadIdx.x%(BN/TN);
+    const int strideCol = blockDim.x/(BN/TN);
+    const int strideRow = blockDim.x/(BM/TM);
+
+    for(int i=0; i<BK; i+=stride)
+    {
+        shV[(idxRow + i)*BN + idxCol] = V[(idxRow + i)*d + idxCol];
+    }
+    __syncthreads();
+    float regA[TM];
+    float regB[TN];
+    float pSum[TM][TN];
+
+    for(int k=0; k<BK; k++)
+    {
+        for(int i=0; i<TM; i++)
+        {
+            regA[i] = shP[(dotIdxRow + i*strideRow)*BK + k];
+        }
+        for(int i=0; i<TN; i++)
+        {
+            regB[i] = shV[k*BN + (dotIdxCol + i*strideCol)];
+        }
+        for(int i=0; i<TM; i++)
+        {
+            for(int j=0; j<TN; j++)
+            {
+                pSum[i][j] += regA[i]*regB[j];
+            }
+        }
+    }
+
+    float regM_New_i[TM];
+    float regM_i[TM];
+    float regM_ij[TM];
+
+    float regL_New_i[TM];
+    float regL_i[TM];
+    for(int i=0; i<TM; i++)
+    {
+        //Load all M, and all L to registers
+        regM_New_i[i] = shM_New_i[i*strideRow + dotIdxRow];
+        regM_i[i]
+
+        for(int j=0; j<TN; j++)
+        {
+            //Load O to shO;
+
+            //Load 
+            pSum[i][j] *= 
+
+        }
+    }
+
+
+    
 }
