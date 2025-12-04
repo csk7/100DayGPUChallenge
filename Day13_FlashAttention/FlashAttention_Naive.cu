@@ -68,7 +68,7 @@ __global__ void flashAttentionKernel(float* Q, float* K, float* V, float* O, flo
     __shared__ float shM_ij[Br];
     __shared__ float shL_ij[Br];
     __shared__ float shM_New_i[Br];
-    __shared__ float shL_New_i[Bc];
+    __shared__ float shL_New_i[Br];
 
     const int blockRow = blockIdx.x*Br;
     if(blockRow > N) return; //Exit condition
@@ -108,11 +108,6 @@ __global__ void flashAttentionKernel(float* Q, float* K, float* V, float* O, flo
 template<const int Br=32, const int Bc = 32 , const int TM = 1, const int TN = 1, const int d = 32, const int WARPSIZE>
 void gpuFlashAttention(float** h_Q, float** h_K, float** h_V, float** h_O, int N) //N is sequence length. d is the head dim.
 {
-    const int BR = 32;
-    //const int BC = 32;
-    //const int TM = 1;
-    //const int TN = 1;
-    //Prep Host values
     float* h_Q_1D = convert_2D_to_1D(h_Q, N, d);
     float* h_K_1D = convert_2D_to_1D(h_K, N, d);
     float* h_V_1D = convert_2D_to_1D(h_V, N, d);
@@ -152,7 +147,7 @@ void gpuFlashAttention(float** h_Q, float** h_K, float** h_V, float** h_O, int N
     //Call Kernel
     dim3 blockSize(TX_PER_BLOCK,1,1);
 
-    dim3 gridSize(CEIL_CUSTOM(N,BR),1, 1);
+    dim3 gridSize(CEIL_CUSTOM(N,Br),1, 1);
     //size_t shMemSize = (2*BR*d + 2*BC*d)*sizeof(float);
 
     flashAttentionKernel<Br, Bc, TM, TN, d, WARPSIZE><<<gridSize, blockSize>>>(Q, K, V, O, d_m, d_l, N);
@@ -170,8 +165,8 @@ void gpuFlashAttention(float** h_Q, float** h_K, float** h_V, float** h_O, int N
 
 int main()
 {
-    int N = 4;
-    int d = 4;
+    int N = 8;
+    const int d = 4;
     const int WARPSIZE = 4;
 
     float** h_Q;
@@ -191,7 +186,7 @@ int main()
     assignHostValues(h_V, N, d);
 
     attentionCpu(h_Q, h_K, h_V, cpu_h_O, N, d);
-    gpuFlashAttention<4, 4, 1, 1, 4, WARPSIZE>(h_Q, h_K, h_V, gpu_h_O, N);
+    gpuFlashAttention<4, 4, 1, 1, d, WARPSIZE>(h_Q, h_K, h_V, gpu_h_O, N);
     
     mismatch2D(cpu_h_O, gpu_h_O, N, d);
 

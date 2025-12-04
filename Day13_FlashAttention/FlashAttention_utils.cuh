@@ -35,8 +35,6 @@ __device__ void load_Q(float* Q, float* shQ, int N, int d)
     for(int i=0; i<BM; i+=stride)
     {
         shQ[(idxRow + i)*d + idxCol] =  Q[(idxRow + i)*d + idxCol];
-        if(threadIdx.x>=4 and threadIdx.x < 8)
-            printf("The value at thread %d is %f \n",threadIdx.x , shQ[(idxRow + i)*d + idxCol]);
     }
 }
 
@@ -63,7 +61,6 @@ __device__ void load_L_i_M_i(float* shM_i, float* shL_i, float* m, float* l)
         shL_i[threadIdx.x] = l[threadIdx.x];
         shM_i[threadIdx.x] = m[threadIdx.x];
     }
-    
 }
 
 template<const int BM=32, const int BN=32, const int TM=1, const int TN=1>
@@ -160,9 +157,9 @@ __device__ void rowMax_calculateP_rowSum(float* shS_P, float* shM_ij, float* shL
     for(int i=0; i<TM; i++)
     {
         float valS_ij = shS_P[(idxRow + i*stride)*BN + idxCol];
+        
         //Step 10;
         float valM_ij = warpMax<float, WARPSIZE>(valS_ij);
-        
         if(idxCol == 0)
         {
             shM_ij[idxRow + i*stride] = valM_ij; //Getting the max wal of each row to all the threads in the warp. We have to go to shmem.
@@ -215,7 +212,7 @@ __device__ void __inline__ matMulPV_Update_O(float* shV, float* shP, float* shO,
 
     float regA[TM];
     float regB[TN];
-    float pSum[TM][TN];
+    float pSum[TM][TN] = {0.0};
 
     for(int k=0; k<BK; k++)
     {
