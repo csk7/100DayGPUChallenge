@@ -143,3 +143,10 @@ void gpuFlashAttention(float** h_Q, float** h_K, float** h_V, float** h_O, int N
     cudaFree(K);
     cudaFree(O);
 }
+
+int main()
+{
+    const int N = 32;
+    const int d = 32;
+    
+}
