@@ -12,7 +12,7 @@
 #define CEIL_CUSTOM(M, N) (((M) + (N) - 1)/(N))
 
 
-template<const int BN>
+template<const int BN=32>
 __device__ void load_K_V(float* K, float* V, float* shK_T, float* shV, int N, int d)
 {
     const int idxRow = threadIdx.x/d;
@@ -25,8 +25,22 @@ __device__ void load_K_V(float* K, float* V, float* shK_T, float* shV, int N, in
         shV[(idxRow + i)*d + idxCol] =  V[(idxRow + i)*d + idxCol];
     }
 }
+template<const int BM=32>
+__device__ void load_Q(float* Q, float* shQ, int N, int d)
+{
+    const int idxRow = threadIdx.x/d;
+    const int idxCol = threadIdx.x%d;
+    const int stride = blockDim.x/d;
 
-template<const int BM>
+    for(int i=0; i<BM; i+=stride)
+    {
+        shQ[(idxRow + i)*d + idxCol] =  Q[(idxRow + i)*d + idxCol];
+        if(threadIdx.x>=4 and threadIdx.x < 8)
+            printf("The value at thread %d is %f \n",threadIdx.x , shQ[(idxRow + i)*d + idxCol]);
+    }
+}
+
+template<const int BM=32>
 __device__ void load_O(float* O, float* shO, int d)
 {
     const int idxRow = threadIdx.x/d;
@@ -39,38 +53,29 @@ __device__ void load_O(float* O, float* shO, int d)
     }
 }
 
-template<const int BM>
+template<const int BM=32>
 __device__ void load_L_i_M_i(float* shM_i, float* shL_i, float* m, float* l)
 {
-    assert(BM <= blockDim.x)
+    assert(BM <= blockDim.x);
+    
     if(threadIdx.x < BM)
     {
         shL_i[threadIdx.x] = l[threadIdx.x];
         shM_i[threadIdx.x] = m[threadIdx.x];
     }
+    
 }
 
-template<const int BM, const int BN, const int TM, const int TN>
-__device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ loadQ_matMulS(float* Q, float* shQ, float* shS, int d)
+template<const int BM=32, const int BN=32, const int TM=1, const int TN=1>
+__device__ void __inline__ matMulS(float* shQ, float* shK_T, float* shS, int d)
 {
-    assert(BM*BN/(TM*TN) == blockDim.x)
-    //To store to shMem
-    const int idxRow = threadIdx.x/d;
-    const int idxCol = threadIdx.x%d;
-    const int stride = blockDim.x/d;
+    assert(BM*BN/(TM*TN) == blockDim.x);
     //To do dot product
     const int dotIdxRow = threadIdx.x/(BN/TN);
     const int dotIdxCol = threadIdx.x%(BN/TN);
     const int strideCol = blockDim.x/(BN/TN);
     const int strideRow = blockDim.x/(BM/TM);
     
-
-    //load Shared Mem
-    for(int i=0; i<BM; i+=stride)
-    {
-        shQ[(idxRow + i)*BK + idxCol] = Q[(idxRow + i)*d + idxCol];
-    }
-    __syncthreads();
     float regA[TM];
     float regB[TN];
     float pSum[TM][TN];
@@ -83,7 +88,7 @@ __device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ loadQ_matMulS(fl
         }
         for(int i=0; i<TN; i++)
         {
-            regB[i] = shB[k*BN + (dotIdxCol + i*strideCol)];
+            regB[i] = shK_T[k*BN + (dotIdxCol + i*strideCol)];
         }
         for(int i=0; i<TM; i++)
         {
@@ -118,33 +123,36 @@ __device__ __forceinline__ T __sum(T value1, T value2)
 }
 
 
-template<typename T, typename Op, const int WARPSIZE=32>
+template<typename T, const int WARPSIZE=32, typename Op>
 __device__ __inline__ T warpReduce(T val, Op warpOp)
 {
     for(int level=WARPSIZE >> 1; level>=1; level >>= 1)
     {
-        val = warpOp(val,__shfl_down_sync(0xffffffff, val, level));
+        if(WARPSIZE == 32)
+            val = warpOp(val,__shfl_down_sync(0xffffffff, val, level));
+        else
+            val = warpOp(val,__shfl_down_sync(0xf, val, level));
     }
     return val;
 }
 
-template<typename T>
+template<typename T, const int WARPSIZE=32>
 __device__ __inline__ T warpSum(T val)
 {
-    return warpReduce<T>(val, __sum<T>);
+    return warpReduce<T, WARPSIZE>(val, __sum<T>);
 }
 
-template<typename T>
+template<typename T, const int WARPSIZE=32>
 __device__ __inline__ T warpMax(T val)
 {
-    return warpReduce<T>(val, __max<T>);
+    return warpReduce<T, WARPSIZE>(val, __max<T>);
 }
 
 //RowMax
-template<const int BM, const int BN, const int TM, const int WARPSIZE=32>
+template<const int BM=32, const int BN=32, const int TM=1, const int WARPSIZE=32>
 __device__ void rowMax_calculateP_rowSum(float* shS_P, float* shM_ij, float* shL_ij)
 {
-    assert(BN == WARPSIZE);
+    assert(BN <= WARPSIZE);
     const int idxRow = threadIdx.x/BN;
     const int idxCol = threadIdx.x%BN;
     const int stride = blockDim.x/BN;
@@ -153,7 +161,7 @@ __device__ void rowMax_calculateP_rowSum(float* shS_P, float* shM_ij, float* shL
     {
         float valS_ij = shS_P[(idxRow + i*stride)*BN + idxCol];
         //Step 10;
-        float valM_ij = warpSum(valMax);
+        float valM_ij = warpMax<float, WARPSIZE>(valS_ij);
         
         if(idxCol == 0)
         {
@@ -162,9 +170,9 @@ __device__ void rowMax_calculateP_rowSum(float* shS_P, float* shM_ij, float* shL
         __syncthreads();
         valM_ij =  shM_ij[idxRow + i*stride];
         float tempP_ij = expf(valS_ij - valM_ij);
-        shS[(idxRow + i*stride)*BN + idxCol] = tempP_ij;
+        shS_P[(idxRow + i*stride)*BN + idxCol] = tempP_ij;
         __syncthreads(); //TO-DO: Remove this.
-        valL_ij = warpSum(tempP_ij);
+        float valL_ij = warpSum<float, WARPSIZE>(tempP_ij);
         if(idxCol == 0)
         {
             shL_ij[idxRow + i*stride] = valL_ij; //Getting the sum across P of each row. This has to be propagated to multiple threads possible.
@@ -175,10 +183,10 @@ __device__ void rowMax_calculateP_rowSum(float* shS_P, float* shM_ij, float* shL
 }
 
 //Step 11
-template<const int BM>
+template<const int BM=32>
 __device__ void calculate_Mnew_i_Lnew_i(float* shM_i, float* shL_i, float* shM_ij, float* shM_New_i, float* shL_New_i, float* shL_ij)
 {
-    assert(BM <= blockDim.x)
+    assert(BM <= blockDim.x);
     if(threadIdx.x < BM)
     {
         float valM_i  = shM_i[threadIdx.x];
@@ -189,16 +197,16 @@ __device__ void calculate_Mnew_i_Lnew_i(float* shM_i, float* shL_i, float* shM_i
 
         float valL_i = shL_i[threadIdx.x];
         float valL_ij = shL_ij[threadIdx.x];
-        shL_New_i[threadIdx.x] = exp(valM_i, valM_New_i)*valL_i + exp(valM_ij, valM_New_i)*valL_ij;
+        shL_New_i[threadIdx.x] = exp(valM_i - valM_New_i)*valL_i + exp(valM_ij - valM_New_i)*valL_ij;
     }
 }
 
 //Step12
-template<const int BM, const int BN, const int BK, const int TM, const int TN>
-__device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ matMulPV_Update_O(float* shV, float* shP, float* shO, \
+template<const int BM=32, const int BN=32, const int BK=32, const int TM=1, const int TN=1>
+__device__ void __inline__ matMulPV_Update_O(float* shV, float* shP, float* shO, \
                                                         float* shM_ij, float* shM_New_i, float* shM_i, float* shL_New_i, float* shL_i, int N, int d)
 {
-    assert(BM*BN/(TM*TN) == blockDim.x)
+    assert(BM*BN/(TM*TN) == blockDim.x);
     //To do dot product
     const int dotIdxRow = threadIdx.x/(BN/TN);
     const int dotIdxCol = threadIdx.x%(BN/TN);
@@ -253,10 +261,10 @@ __device__ void __launch_bounds__((BM*BN)/(TM*TN),1) __inline__ matMulPV_Update_
     }
 }
 
-template<const int BM>
+template<const int BM=32>
 __device__ void copy_L_i_M_i(float* shM_i, float* shL_i, float* shM_New_i, float* shL_New_i)
 {
-    assert(BM <= blockDim.x)
+    assert(BM <= blockDim.x);
     if(threadIdx.x < BM)
     {
         shL_i[threadIdx.x] = shL_New_i[threadIdx.x];
@@ -264,7 +272,7 @@ __device__ void copy_L_i_M_i(float* shM_i, float* shL_i, float* shM_New_i, float
     }
 }
 
-template<const int BM>
+template<const int BM=32>
 __device__ void write_O(float* O, float* shO, int d)
 {
     const int idxRow = threadIdx.x/d;

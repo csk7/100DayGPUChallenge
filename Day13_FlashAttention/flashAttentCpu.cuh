@@ -1,3 +1,10 @@
+#pragma once
+#include<iostream>
+#include<cuda.h>
+#include<cmath>
+#include<random>
+#include<cassert>
+using namespace std;
 
 void matMulTCpu(float** h_A, float** h_B, float** h_C, int M, int N, int K)
 {
@@ -72,13 +79,61 @@ void softmaxCpu(float** h_A, float** h_C, int M, int N)
     }
 }
 
+float** assignHostSpace(int rows, int cols)
+{
+    float** hostArr;
+    hostArr = new float*[rows];
+    for(int i=0; i<rows; i++)
+    {
+        hostArr[i] = new float[cols];
+        for(int j=0; j<cols; j++)
+        {
+            hostArr[i][j] = 0;
+        }
+    }
+    return hostArr;
+}
+
+void assignHostValues(float** hostArr, int rows, int cols)
+{
+    mt19937 gen(2025);  // fixed seed for determinism
+    uniform_real_distribution<float> dist(-10.0f, 10.0f);
+    
+    for(int i=0;i<rows;i++)
+    {
+        for(int j=0; j<cols; j++)
+        {
+            hostArr[i][j] = dist(gen);
+        }
+    }
+}
+
+void mismatch2D(float** cpuArr, float** gpuArr, int row, int col)
+{
+    int flag = 1;
+    const float epsilon = 1e-6f; // 5 decimal places tolerance
+    for(int i=0; i<row; i++)
+    {
+        for(int j = 0; j<col; j++)
+        {
+            if(fabsf(cpuArr[i][j] - gpuArr[i][j]) > epsilon)
+            {
+                flag = 0;
+                printf("Mismatch at : (%d,%d), CPU: %f ; GPU: %f \n",i,j,cpuArr[i][j],gpuArr[i][j]);
+            }
+        }
+    }
+    if(flag == 1)
+        printf("Success \n");
+}
+
 void attentionCpu(float** Q, float** K, float** V, float** O, float N, float d)
 {
     float** S;
-    allocate2d(S, N, N);
-    matMulTCpu(Q, K, S, int N, int N, int d);
+    S = assignHostSpace(N, N);
+    matMulTCpu(Q, K, S, N, N, d);
     float** P;
-    allocate2d(P, N, N);
+    P = assignHostSpace(N, N);
     softmaxCpu(S, P, N, N);
-    matMulTCpu(P, V, O, int N, int d, int N);
+    matMulCpu(P, V, O, N, d, N);
 }
