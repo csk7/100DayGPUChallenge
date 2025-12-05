@@ -9,7 +9,7 @@ using namespace std;
 #include "flashAttentCpu.cuh"
 #include "FlashAttention_utils.cuh"
 
-#define TX_PER_BLOCK 16
+#define TX_PER_BLOCK 256
 
 float* convert_2D_to_1D(float** inpArr, int rows, int cols)
 {
@@ -57,6 +57,7 @@ void setVal1d(float* inpArr, float val, int N)
 template<const int Br=32, const int Bc = 32 , const int TM = 1, const int TN = 1, const int d = 32, const int WARPSIZE>
 __global__ void flashAttentionKernel(float* Q, float* K, float* V, float* O, float* m ,float* l, int N)
 {
+    
     __shared__ float shQ[Br*d];
     __shared__ float shK_T[Bc*d];
     __shared__ float shV[Bc*d];
@@ -79,10 +80,13 @@ __global__ void flashAttentionKernel(float* Q, float* K, float* V, float* O, flo
     m += blockRow;
     l += blockRow;
     
+    
     load_L_i_M_i<Br>(shM_i, shL_i, m, l);
     
     load_O<Br>(O, shO, d);
     load_Q<Br>(Q, shQ, N, d);
+    
+    
 
     for(int j=0; j<N; j+=Bc) //j is from FA paper
     {
@@ -93,15 +97,44 @@ __global__ void flashAttentionKernel(float* Q, float* K, float* V, float* O, flo
         rowMax_calculateP_rowSum<Br, Bc, TM, WARPSIZE>(shS_P, shM_ij, shL_ij);
         __syncthreads();
         calculate_Mnew_i_Lnew_i<Br>(shM_i, shL_i, shM_ij, shM_New_i, shL_New_i, shL_ij);
+        /*__syncthreads();
+        if(blockIdx.x == 0 && j==2 && threadIdx.x == 0)
+        {
+            printf("GPU : \n");
+            for(int i=0; i<Br; i++)
+            {
+                for(int j = 0; j<Bc; j++)
+                {
+                    printf("%f \t", shS_P[i*Bc + j]);
+                }
+                printf("\n");
+            }
+             
+            printf("GPU M_i: \n");
+            for(int i=0; i<Br; i++)
+            {
+                printf("%f \n", shM_i[i]);
+            }
+            printf("GPU M_ij: \n");
+            for(int i=0; i<Br; i++)
+            {
+                printf("%f \n", shM_ij[i]);
+            }
+            printf("GPU M_i: \n");
+            for(int i=0; i<Br; i++)
+            {
+                printf("%f \n", shM_New_i[i]);
+            }
+        }*/
         __syncthreads();
-        matMulPV_Update_O<Br,Bc, d, TM, TN>(shV, shS_P, shO, shM_ij, shM_New_i, shM_i, shL_New_i, shL_i, N, d);
+        matMulPV_Update_O<Br, d, Bc, TM, (d/Bc)>(shV, shS_P, shO, shM_ij, shM_New_i, shM_i, shL_New_i, shL_i, N, d);
         __syncthreads();
         copy_L_i_M_i<Br>(shM_i, shL_i, shM_New_i, shL_New_i);
-
+        __syncthreads();
         K += Bc*d;
         V += Bc*d;
     }
-    write_O(O, shO, d);
+    write_O<Br>(O, shO, d);
 
 }
 
@@ -165,9 +198,14 @@ void gpuFlashAttention(float** h_Q, float** h_K, float** h_V, float** h_O, int N
 
 int main()
 {
-    int N = 8;
-    const int d = 4;
-    const int WARPSIZE = 4;
+    int N = 4*1024;
+    const int d = 128;
+    const int WARPSIZE = 32;
+    const int TM = 1;
+    const int TN = 1;
+    const int BM = 8;
+    const int BN = 32;
+
 
     float** h_Q;
     float** h_K;
@@ -186,7 +224,7 @@ int main()
     assignHostValues(h_V, N, d);
 
     attentionCpu(h_Q, h_K, h_V, cpu_h_O, N, d);
-    gpuFlashAttention<4, 4, 1, 1, d, WARPSIZE>(h_Q, h_K, h_V, gpu_h_O, N);
+    gpuFlashAttention<BM, BN, TM, TN, d, WARPSIZE>(h_Q, h_K, h_V, gpu_h_O, N);
     
     mismatch2D(cpu_h_O, gpu_h_O, N, d);
 

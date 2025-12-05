@@ -24,6 +24,19 @@ __device__ void load_K_V(float* K, float* V, float* shK_T, float* shV, int N, in
         shK_T[idxCol*BN + (idxRow+i)] = K[(idxRow + i)*d + idxCol];
         shV[(idxRow + i)*d + idxCol] =  V[(idxRow + i)*d + idxCol];
     }
+    
+    /*if(blockIdx.x == 1 && threadIdx.x == 0)
+    {
+        printf("GPU K: \n");
+        for(int i=0; i<4; i++)
+        {
+            for(int j = 0; j<4; j++)
+            {
+                printf("%f \t", shK_T[i*BN + j]);
+            }
+            printf("\n");
+        }
+    }*/
 }
 template<const int BM=32>
 __device__ void load_Q(float* Q, float* shQ, int N, int d)
@@ -41,6 +54,7 @@ __device__ void load_Q(float* Q, float* shQ, int N, int d)
 template<const int BM=32>
 __device__ void load_O(float* O, float* shO, int d)
 {
+    assert(blockDim.x>=d);
     const int idxRow = threadIdx.x/d;
     const int idxCol = threadIdx.x%d;
     const int stride = blockDim.x/d;
@@ -75,7 +89,7 @@ __device__ void __inline__ matMulS(float* shQ, float* shK_T, float* shS, int d)
     
     float regA[TM];
     float regB[TN];
-    float pSum[TM][TN];
+    float pSum[TM][TN] = {0.0};
 
     for(int k=0; k<d; k++)
     {
@@ -127,8 +141,10 @@ __device__ __inline__ T warpReduce(T val, Op warpOp)
     {
         if(WARPSIZE == 32)
             val = warpOp(val,__shfl_down_sync(0xffffffff, val, level));
-        else
-            val = warpOp(val,__shfl_down_sync(0xf, val, level));
+        else if(WARPSIZE == 4)
+            val = warpOp(val,__shfl_down_sync(0xF, val, level));
+        else 
+            val = warpOp(val,__shfl_down_sync(0x3, val, level));
     }
     return val;
 }
@@ -194,7 +210,7 @@ __device__ void calculate_Mnew_i_Lnew_i(float* shM_i, float* shL_i, float* shM_i
 
         float valL_i = shL_i[threadIdx.x];
         float valL_ij = shL_ij[threadIdx.x];
-        shL_New_i[threadIdx.x] = exp(valM_i - valM_New_i)*valL_i + exp(valM_ij - valM_New_i)*valL_ij;
+        shL_New_i[threadIdx.x] = expf(valM_i - valM_New_i)*valL_i + expf(valM_ij - valM_New_i)*valL_ij;
     }
 }
 
@@ -207,8 +223,8 @@ __device__ void __inline__ matMulPV_Update_O(float* shV, float* shP, float* shO,
     //To do dot product
     const int dotIdxRow = threadIdx.x/(BN/TN);
     const int dotIdxCol = threadIdx.x%(BN/TN);
-    const int strideCol = blockDim.x/(BN/TN);
-    const int strideRow = blockDim.x/(BM/TM);
+    const int strideCol = BN/TN;
+    const int strideRow = BM/TM;
 
     float regA[TM];
     float regB[TN];
@@ -251,8 +267,12 @@ __device__ void __inline__ matMulPV_Update_O(float* shV, float* shP, float* shO,
 
         for(int j=0; j<TN; j++)
         {
-            shO[(dotIdxRow + i*strideRow)*BN + (dotIdxCol + j*strideCol)] = ((regL_i[i]*exp(regM_i[i] - regM_New_i[i])*shO[(dotIdxRow + i*strideRow)*BN + (dotIdxCol + j*strideCol)])
-                                                        + (exp(regM_ij[i] - regM_New_i[i]) * pSum[i][j]))/regL_New_i[i]; 
+            shO[(dotIdxRow + i*strideRow)*d + (dotIdxCol + j*strideCol)] = ((regL_i[i]*expf(regM_i[i] - regM_New_i[i])*shO[(dotIdxRow + i*strideRow)*d + (dotIdxCol + j*strideCol)])
+                                                        + (expf(regM_ij[i] - regM_New_i[i]) * pSum[i][j]))/regL_New_i[i]; 
+            /*if(dotIdxRow == 0 && (dotIdxCol) == 2 && blockIdx.x == 0)
+            {
+                printf("shO at j=%d , why %d- is  : %f\n", dotIdxCol + j*strideCol, strideCol, shO[(dotIdxRow + i*strideRow)*d + (dotIdxCol + j*strideCol)]);
+            }*/
 
         }
     }
@@ -279,5 +299,6 @@ __device__ void write_O(float* O, float* shO, int d)
     for(int i=0; i<BM; i+=stride)
     {
         O[(idxRow + i)*d + idxCol] =  shO[(idxRow + i)*d + idxCol];
+        
     }
 }

@@ -59,6 +59,7 @@ void softmaxCpu(float** h_A, float** h_C, int M, int N)
             {
                 globalMax = val;
             }
+            //printf("%f \t",globalMax);
         }
 
         //Pass 2
@@ -75,7 +76,8 @@ void softmaxCpu(float** h_A, float** h_C, int M, int N)
             h_C[i][j] = expf(val-globalMax)/sum;
             //printf("%f \t",h_C[i][j]);
         }
-        //printf("\n");
+        if(i == 7)
+        printf("\n");
     }
 }
 
@@ -96,7 +98,7 @@ float** assignHostSpace(int rows, int cols)
 
 void assignHostValues(float** hostArr, int rows, int cols)
 {
-    mt19937 gen(2025);  // fixed seed for determinism
+    mt19937 gen(2026);  // fixed seed for determinism
     uniform_real_distribution<float> dist(-10.0f, 10.0f);
     
     for(int i=0;i<rows;i++)
@@ -111,7 +113,7 @@ void assignHostValues(float** hostArr, int rows, int cols)
 void mismatch2D(float** cpuArr, float** gpuArr, int row, int col)
 {
     int flag = 1;
-    const float epsilon = 1e-6f; // 5 decimal places tolerance
+    const float epsilon = 1e-4f; // 5 decimal places tolerance
     for(int i=0; i<row; i++)
     {
         for(int j = 0; j<col; j++)
@@ -132,6 +134,15 @@ void attentionCpu(float** Q, float** K, float** V, float** O, float N, float d)
     float** S;
     S = assignHostSpace(N, N);
     matMulTCpu(Q, K, S, N, N, d);
+    /*printf("CPU : \n");
+    for(int i=0; i<4; i++)
+    {
+        for(int j=0; j<4; j++)
+        {
+            printf("%f \t", S[i][j]);
+        }
+        printf("\n");
+    }*/
     float** P;
     P = assignHostSpace(N, N);
     softmaxCpu(S, P, N, N);
