@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 
 from torch.utils.cpp_extension import load
+from torch.profiler import profile, ProfilerActivity
 
 np.random.seed(2026)
 device = 'cpu'
@@ -34,6 +35,11 @@ def benchmark(func, *args, name):
     print(f'{name} time taken is : {duration:.3f}ms')
     return outputTensor, duration
 
+def customProfiler(func, *args, name):
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        _ = func(*args)
+    prof.export_chrome_trace(name+".json")
+
 if __name__ == '__main__':
     #Generate random input tensors for Q, K, V
     N = 16*1024
@@ -51,6 +57,8 @@ if __name__ == '__main__':
     O_pytorch,_ = benchmark(pytorchGoldens, Q, K, V, name = 'Pytorch Naive')
     #CUDA Flash Attention Naive
     O_cuda,_ = benchmark(cudaAttention.flashAttentionNaiveLauncher,Q, K, V, name='Flash Attention Naive')
+
+    customProfiler(cudaAttention.flashAttentionNaiveLauncher,Q, K, V, name='Flash Attention Naive')
     
     #Goldens test
     tolerance = 1e-4

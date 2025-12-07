@@ -48,7 +48,7 @@ __device__ void __inline__ load_O(float* O, float* shO, int d)
 
     for(int i=0; i<BM; i+=stride)
     {
-        shO[(idxRow + i)*d + idxCol] =  O[(idxRow + i)*d + idxCol];
+        shO[(idxRow + i)*d + idxCol] =  0.0f;
     }
 }
 
@@ -59,8 +59,8 @@ __device__ void __inline__ load_L_i_M_i(float* shM_i, float* shL_i, float* m, fl
     
     if(threadIdx.x < BM)
     {
-        shL_i[threadIdx.x] = l[threadIdx.x];
-        shM_i[threadIdx.x] = m[threadIdx.x];
+        shL_i[threadIdx.x] = 0.0f;
+        shM_i[threadIdx.x] = -INFINITY;
     }
 }
 
