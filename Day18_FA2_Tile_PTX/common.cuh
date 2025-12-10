@@ -7,3 +7,35 @@ __device__ void globalToShared(uint32_t dstAddr, const nv_bfloat16* srcAddr, int
         :
         : "r"(dstAddr), "l"(srcAddr), "n"(16));    
 }
+
+template<const int HEIGHT, const int WIDTH>
+__device__ __inline__ void globalToShared(uint32_t dstAddrBase, nv_bfloat16* srcAddrBase, int elemPerThread, int globalColDim = WIDTH)
+{
+    const int numThreads = blockDim.x;
+    
+    for(int iter=0; iter<((HEIGHT*WIDTH)/(numThreads*elemPerThread)); iter++)
+    {
+        const int index = iter*numThreads*elemPerThread + threadIdx.x*elemPerThread;
+        const int rowIdx = index/WIDTH;
+        const int colIdx = index%WIDTH;
+        uint32_t dst = dstAddrBase + (rowIdx*WIDTH + colIdx)*sizeof(nv_bfloat16);
+        nv_bfloat16* src = srcAddrBase + (rowIdx*globalColDim + colIdx);
+        asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n"
+            :
+            : "r"(dst), "l"(src));
+    }
+}
+
+__device__ __inline__ void sharedToRegx4(uint32_t regArray[4], const uint32_t srcShAddr)
+{
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.b16 {%0, %1, %2, %3}, [%4];\n" //x4 is number of tiles to load
+        :"=r"(regArray[0]), "=r"(regArray[1]), "=r"(regArray[2]), "=r"(regArray[3])
+        :"r"(srcShAddr));
+}
+
+__device__ __inline__ void sharedToRegx2(uint32_t regArray[2], const uint32_t srcAddr)
+{
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.b16 {%0, %1}, [%3];\n"
+        :"=r"(regArray[0]), "=r"(regArray[1])
+        :"r"(srcAddr));
+}

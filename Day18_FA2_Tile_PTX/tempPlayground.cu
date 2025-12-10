@@ -29,9 +29,6 @@ __global__ void bfloat16playGround(nv_bfloat16* dA, nv_bfloat16* dB, nv_bfloat16
     reinterpret_cast<nv_bfloat162 *>(&dC[threadIdx.x*8+2])[0] = tmpY;
     reinterpret_cast<nv_bfloat162 *>(&dC[threadIdx.x*8+4])[0] = tmpZ;
     reinterpret_cast<nv_bfloat162 *>(&dC[threadIdx.x*8+6])[0] = tmpW;
-
-    
-    
 }
 
 int main()

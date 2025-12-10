@@ -15,21 +15,32 @@ __global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16*
     {
         return;
     }
+    //Block pointer moved
     Q += row*d;
     K += (blockDim.y*seqLength)*d;
     V += (blockDim.y*seqLength)*d;
     O += row*d;
 
+    //Shared Mem declaration
     extern __shared__ nv_bfloat16 shMem[];
     const uint32_t QshMem = __cvta_generic_to_shared(shMem);
-    const uint32_t KshMem = QshMem + Br*d*sizeof(nv_bfloat16);
-    const uint32_t VshMem = KshMem;
-    //nv_bfloat16* OshMem = shMem + Br*d + 2*Bc*d;
+    const uint32_t KshMem = QshMem;
 
+    //Thread Index to Warp Id and lane Id
     const int tid = threadIdx.x;
-    //const int warpId = tid/WARPSIZE;
-    //const int laneId = tid%WARPSIZE;
-    //const int numWarps = blockDim.x/WARPSIZE; 
+    const int warpId = tid/WARPSIZE;
+    const int laneId = tid%WARPSIZE;
+    const int numWarps = blockDim.x/WARPSIZE; 
+    const int blockQperWarp = Br/numWarps;
+
+    //Tiled MMA size
+    const int MMA_M = 16;
+    const int MMA_K = 16;
+    const int MMA_N = 8;
+
+    //Reg declaration
+    uint32_t Qreg[blockQperWarp/MMA_M][d/MMA_K][4]; //4  is number of tiles per warp
+    uint32_t Kreg[Bc/MMA_N][d/MMA_K][2];
     
     //Global to shMem transfer
     //Load Q (Br*d)
@@ -37,46 +48,43 @@ __global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16*
     assert((numElementsPerLoad*2) == 4 or (numElementsPerLoad*2) == 8 or (numElementsPerLoad*2) == 16);
     assert(numThreads >= (d/numElementsPerLoad));
 
-    const int idxRow = tid/(d/numElementsPerLoad);
-    const int idxCol = tid%(d/numElementsPerLoad);
-    const int rowStride = blockDim.x/(d/numElementsPerLoad);
-    printf("Hello \t");
-
-    for(int iRows=0; iRows<Br ; iRows+=rowStride)
-    {
-        uint32_t dst = QshMem + ((idxRow+iRows)*d + idxCol*numElementsPerLoad)*sizeof(nv_bfloat16);
-        const nv_bfloat16* src = Q + ((idxRow+iRows)*d + idxCol*numElementsPerLoad);
-        printf("Q : %f \n", __bfloat162float(*src)); 
-        globalToShared(dst, src, numElementsPerLoad);
-    }
-    
-
-    //Load K (Bc*d)
-    /*
-    for(int iRows=0; iRows<Bc ; iRows+=rowStride)
-    {
-        uint32_t dst = KshMem + ((idxRow+iRows)*d + idxCol*numElementsPerLoad)*sizeof(nv_bfloat16);
-        const nv_bfloat16* src = (const nv_bfloat16*)(&K[(idxRow+iRows)*d + idxCol*numElementsPerLoad]);
-        globalToShared(dst, src, numElementsPerLoad);
-    }
-
-    //Load V
-    for(int iRows=0; iRows<Bc; iRows+=rowStride)
-    {
-        uint32_t dst = VshMem + ((idxRow+iRows)*d + idxCol*numElementsPerLoad)*sizeof(nv_bfloat16);
-        const nv_bfloat16* src = (const nv_bfloat16*)(&V[(idxRow+iRows)*d + idxCol*numElementsPerLoad]);
-        globalToShared(dst, src, numElementsPerLoad);
-    }
-        */
+    globalToShared<Br, d>(QshMem, Q, numElementsPerLoad);
     asm volatile("cp.async.commit_group;\n");
     asm volatile("cp.async.wait_all;\n");
+    __syncthreads();
 
-    //Write Qr back
-    nv_bfloat16* QshMemPtr = reinterpret_cast<nv_bfloat16*>(QshMem);
-    for(int iRows=0; iRows<Br; iRows+=rowStride)
+    //Shared to Reg
+    for(int mma_id_row=0; mma_id_row<blockQperWarp; mma_id_row+=MMA_M)
     {
-        reinterpret_cast<int4*>(&O[(idxRow+iRows)*d + idxCol*numElementsPerLoad])[0] = reinterpret_cast<int4*>(&QshMemPtr[(idxRow+iRows)*d + idxCol*numElementsPerLoad])[0];
+        for(int mma_id_col=0; mma_id_col<d; mma_id_col+=MMA_K)
+        {
+            const int idxRow = warpId*blockQperWarp + mma_id_row + laneId%16; //16 is a function of how many tiles (rowWise) are there in the m8n8 load matrix. 2 tiles(2*m8) so 16
+            const int idxCol = mma_id_col + laneId/16*8; //16 --> from above, ldMatrix m8n8. n8 contributes to this;
+            const uint32_t srcShAddress = QshMem + (idxRow*d + idxCol)*sizeof(nv_bfloat16);
+            sharedToRegx4(Qreg[mma_id_row/MMA_M][mma_id_col/MMA_K], srcShAddress);
+        }
     }
+    //Load Q (Bc*d), Global to Shared
+
+    globalToShared<Bc, d>(KshMem, K, numElementsPerLoad);
+    asm volatile("cp.async.commit_group;\n");
+    asm volatile("cp.async.wait_all;\n");
+    __syncthreads();
+
+    //Shared to Reg
+    for(int mma_id_row=0; mma_id_row<Bc; mma_id_row+=MMA_N)
+    {
+        for(int mma_id_col=0; mma_id_col<d; mma_id_col+=MMA_K)
+        {
+            const int idxRow = mma_id_row + laneId%8; //8 is a function of how many tiles (rowWise) are there in the [m8]n8 load matrix
+            const int idxCol = mma_id_col + laneId/8*8; //Second 8 is a function of m8[n8] load matrix
+            const uint32_t srcShAddress = KshMem + (idxRow*d + idxCol)*sizeof(nv_bfloat16);
+            sharedToRegx2(Kreg[mma_id_row/MMA_N][mma_id_col/MMA_K], srcShAddress);
+        }
+    }
+
+
+    
 
 
 }
