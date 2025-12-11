@@ -39,3 +39,10 @@ __device__ __inline__ void sharedToRegx2(uint32_t regArray[2], const uint32_t sr
         :"=r"(regArray[0]), "=r"(regArray[1])
         :"r"(srcAddr));
 }
+
+__device__ __inline__ mma_m16n8k16(uint32_t D[4], uint32_t A[4], uint32_t B[2])
+{
+    asm volatile"("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\n"
+    :"=f"(D[0]), "=f"(D[1]), "=f"(D[2]), "=f"(D[3])
+    :"r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]), "f"(D[0]), "f"(D[1]), "f"(D[2]), "f"(D[3]));
+}

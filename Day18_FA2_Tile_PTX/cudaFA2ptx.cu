@@ -39,9 +39,10 @@ __global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16*
     const int MMA_N = 8;
 
     //Reg declaration
-    uint32_t Qreg[blockQperWarp/MMA_M][d/MMA_K][4]; //4  is number of tiles per warp
+    uint32_t Qreg[blockQperWarp/MMA_M][d/MMA_K][4]; //4  16*16/32 following below logic (2  bf16 per reg)
     uint32_t Kreg[Bc/MMA_N][d/MMA_K][2];
-    
+    uint32_t Sreg[blockQperWarp/MMA_M][Bc/MMA_N][4]; //fp32. So per warp total space/32 --> 16*8/32
+    float Oreg[blockQperWarp/MMA_M][d/MMA_K][4]; //4  is number of tiles per warp
     //Global to shMem transfer
     //Load Q (Br*d)
     const int numElementsPerLoad = 8;
@@ -64,27 +65,58 @@ __global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16*
             sharedToRegx4(Qreg[mma_id_row/MMA_M][mma_id_col/MMA_K], srcShAddress);
         }
     }
-    //Load Q (Bc*d), Global to Shared
 
-    globalToShared<Bc, d>(KshMem, K, numElementsPerLoad);
-    asm volatile("cp.async.commit_group;\n");
-    asm volatile("cp.async.wait_all;\n");
-    __syncthreads();
-
-    //Shared to Reg
-    for(int mma_id_row=0; mma_id_row<Bc; mma_id_row+=MMA_N)
+    for(int idx_KV = 0; idx_KV<L; idx_KV+=Bc)
     {
-        for(int mma_id_col=0; mma_id_col<d; mma_id_col+=MMA_K)
+        float Sreg[blockQperWarp/MMA_M][Bc/MMA_N][4] = {};
+        //Load K (Bc*d), Global to Shared
+        globalToShared<Bc, d>(KshMem, K, numElementsPerLoad);
+        asm volatile("cp.async.commit_group;\n");
+        asm volatile("cp.async.wait_all;\n");
+        __syncthreads();
+
+        //Shared to Reg
+        for(int mma_id_row=0; mma_id_row<Bc; mma_id_row+=MMA_N)
         {
-            const int idxRow = mma_id_row + laneId%8; //8 is a function of how many tiles (rowWise) are there in the [m8]n8 load matrix
-            const int idxCol = mma_id_col + laneId/8*8; //Second 8 is a function of m8[n8] load matrix
-            const uint32_t srcShAddress = KshMem + (idxRow*d + idxCol)*sizeof(nv_bfloat16);
-            sharedToRegx2(Kreg[mma_id_row/MMA_N][mma_id_col/MMA_K], srcShAddress);
+            for(int mma_id_col=0; mma_id_col<d; mma_id_col+=MMA_K)
+            {
+                const int idxRow = mma_id_row + laneId%8; //8 is a function of how many tiles (rowWise) are there in the [m8]n8 load matrix
+                const int idxCol = mma_id_col + laneId/8*8; //Second 8 is a function of m8[n8] load matrix
+                const uint32_t srcShAddress = KshMem + (idxRow*d + idxCol)*sizeof(nv_bfloat16);
+                sharedToRegx2(Kreg[mma_id_row/MMA_N][mma_id_col/MMA_K], srcShAddress);
+            }
         }
+
+        //MMA
+        for(int i=0; i<(blockQperWarp/MMA_M), i++)
+        {
+            for(int j=0; j<(Bc/MMA_N); j++)
+            {
+                for(int k=0; j<(d/MMA_K); k++)
+                {
+                    mma_m16n8k16(Sreg[i][j], Qreg[i][k], Kreg[j][k]);
+                }
+            }
+        }
+
+        K += Bc*d;
+        V += Bc*d;
     }
 
-
-    
+    for(int mma_id_row=0; mma_id_row<(blockQperWarp/MMA_M); mma_id_row++)
+    {
+        for(int mma_id_col=0; mma_id_col<(d/MMA_N); mma_id_col++)
+        {
+            const int idxRow = warpId*blockQperWarp + mma_id_row + laneId/4; //So, 32 tx write a m16n8 output. So each tx writes 4 outs. fp32 out each occupy 1 reg.
+            //Tx 0 gets 4 outputs. Row0, Col0, Col1 stored in Reg0 and Reg1 as fp32. If it was bf16 then Both in reg0. 
+            //Only half the ouput regs are written by a tx in one row. Other half to m16/2 row. In fp32 you need 4 tx to fill a row. 
+            //Each tx rows are current row + m16/2.   
+            const int idxCol = mma_id_col + laneId%4*2; //2 as each row is writing 2 elems. 8 n8 so %4.  
+            float* temp = Oreg[mma_id_row][mma_id_col];
+            reinterpret_cast<nv_bfloat162*>(&O[idxRow*d + idxCol])[0] = __float22bfloat162_rn({temp[0], temp[1]});
+            reinterpret_cast<nv_bfloat162*>(&O[(idxRow + 8)*d + idxCol])[0] = __float22bfloat162_rn({temp[0], temp[1]});
+        }
+    }
 
 
 }
