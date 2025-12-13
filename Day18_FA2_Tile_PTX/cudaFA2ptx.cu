@@ -25,6 +25,7 @@ __global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16*
     extern __shared__ nv_bfloat16 shMem[];
     const uint32_t QshMem = __cvta_generic_to_shared(shMem);
     const uint32_t KshMem = QshMem;
+    const uint32_t VshMem = KshMem +  Bc*d*sizeof(nv_bfloat16);
 
     //Thread Index to Warp Id and lane Id
     const int tid = threadIdx.x;
@@ -41,6 +42,8 @@ __global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16*
     //Reg declaration
     uint32_t Qreg[blockQperWarp/MMA_M][d/MMA_K][4]; //4  16*16/32 following below logic (2  bf16 per reg)
     uint32_t Kreg[Bc/MMA_N][d/MMA_K][2];
+    uint32_t Vreg[Bc/MMA_K][d/MMA_N][2];
+    uint32_t Preg[Bc/MMA_K][d/MMA_N][4];
     float Sreg[blockQperWarp/MMA_M][Bc/MMA_N][4]; //fp32. So per warp total space/32 --> 16*8/32
     float Oreg[blockQperWarp/MMA_M][d/MMA_K][4] = {}; //4  is number of tiles per warp
 
@@ -154,15 +157,22 @@ __global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16*
             float* sumexp = {0.0, 0.0};
             for(int j=0; j<(Bc/MMA_N); j++)
             {
-                S[i][j][0] = expf(S[i][j][0] - maxTileRow[0]);
-                S[i][j][1] = expf(S[i][j][1] - maxTileRow[0]);
-                S[i][j][2] = expf(S[i][j][0] - maxTileRow[1]);
-                S[i][j][3] = expf(S[i][j][1] - maxTileRow[1]);
+                Sreg[i][j][0] = expf(Sreg[i][j][0] - rowMax[i][0]);
+                Sreg[i][j][1] = expf(Sreg[i][j][1] - rowMax[i][0]);
+                Sreg[i][j][2] = expf(Sreg[i][j][0] - rowMax[i][1]);
+                Sreg[i][j][3] = expf(Sreg[i][j][1] - rowMax[i][1]);
 
+                //row sum in same tx
                 sumexp[0] += S[i][j][0] + S[i][j][1];
                 sumexp[1] += S[i][j][2] + S[i][j][3];
+
+                //Need to rearange P
+                nv_bfloat162* this_Preg = reinterpret_cast<nv_bfloat162*>(Preg[i][j/2]); //We need to accumulate 2 n/8 to n/16. So 0 and 1 S points to same P
+                this_Preg[(j%2)*2] = __float22bfloat162_rn({S[i][j][0], S[i][j][1]}); //P has 4 reg to fill. 0 and 1 filled when j is even and 2 and 3 when its odd [As Zig Zag orders x2 to x4]
+                this_Preg[(j%2)*2+1] = __float22bfloat162_rn({S[i][j][2], S[i][j][3]});
             }
 
+            //Rwo sum across tx
             sumexp[0] += __shfl_xor_sync('0xFFFFFFFF', sumexp[0], 1);
             sumexp[0] += __shfl_xor_sync('0xFFFFFFFF', sumexp[0], 2);
             sumexp[1] += __shfl_xor_sync('0xFFFFFFFF', sumexp[1], 1);
@@ -171,10 +181,34 @@ __global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16*
 
             rowSumExp[i][0] = rowSumExp[i][0]*rescale[0] +  sumexp[0];
             rowSumExp[i][1] = rowSumExp[i][1]*rescale[1] + sumexp[1];
+        }
 
+        //Load V to registers
+        globalToShared<Bc, d>(VshMem, V, numElementsPerLoad);
+        asm volatile("cp.async.commit_groups;\n");
+        asm volatile("cp.async.wait_all;\n");
 
-            
+        for(int mma_i_row=0; mma_i_row<(Bc/MMA_K); mma_i_row++)
+        {
+            for(int mma_j_col=0; mma_j_col<(d/MMA_N); mma_j_col++)
+            {
+                const int idxRow = mma_i_row*MMA_K + laneId%16;
+                const int idxCol = mma_j_col*MMA_N + laneId/16*8;
+                const uint32_t srcAddr = VshMem + (idxRow*d + idxCol)*sizeof(nv_bfloat16);
+                sharedToRegx2Trans(Vreg[mma_i_row][mma_j_col], srcAddr);
+            }
+        }
 
+        //MMA
+        for(int i=0; i<(blockQperWarp/MMA_M), i++)
+        {
+            for(int j=0; j<(d/MMA_N); j++)
+            {
+                for(int k=0; k<(Bc/MMA_K); k++)
+                {
+                    mma_m16n8k16(Oreg[i][j], Preg[i][k], Vreg[k][j]);
+                }
+            }
         }
 
 
@@ -191,15 +225,24 @@ __global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16*
             //Tx 0 gets 4 outputs. Row0, Col0, Col1 stored in Reg0 and Reg1 as fp32. If it was bf16 then Both in reg0. 
             //Only half the ouput regs are written by a tx in one row. Other half to m16/2 row. In fp32 you need 4 tx to fill a row. 
             //Each tx rows are current row + m16/2.   
-            const int idxCol = mma_id_col + laneId%4*2; //2 as each row is writing 2 elems. 8 n8 so %4.  
+            const int idxCol = mma_id_col + (laneId%4)*2; //2 as each row is writing 2 elems. 8 n8 so %4.  
+            
+            //scaling softmax sum
             float* temp = Oreg[mma_id_row][mma_id_col];
+            temp[0] = temp[0]/rowSumExp[mma_id_row][0];
+            temp[1] = temp[1]/rowSumExp[mma_id_row][0];
+            temp[2] = temp[2]/rowSumExp[mma_id_row][1];
+            temp[3] = temp[3]/rowSumExp[mma_id_row][1];
+            
             reinterpret_cast<nv_bfloat162*>(&O[idxRow*d + idxCol])[0] = __float22bfloat162_rn({temp[0], temp[1]});
-            reinterpret_cast<nv_bfloat162*>(&O[(idxRow + 8)*d + idxCol])[0] = __float22bfloat162_rn({temp[0], temp[1]});
+            reinterpret_cast<nv_bfloat162*>(&O[(idxRow + 8)*d + idxCol])[0] = __float22bfloat162_rn({temp[2], temp[3]});
         }
     }
 
 
 }
+
+
 
 int main()
 {
