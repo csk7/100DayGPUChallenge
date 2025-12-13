@@ -7,7 +7,7 @@
 
 /* Inputs are Q-> B, L, d and KV-> B, L, d and output is B, L, d*/
 
-template<const int batchSize = 1, const int Br=128, const int Bc=128, const int d=128, const int numThreads = 128> 
+template<const int batchSize = 1, const int Br=128, const int Bc=128, const int d=128, const int numThreads = 128, const float scaling_factor = 0.088> 
 __global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, const nv_bfloat16* V, nv_bfloat16* O, const int seqLength)
 {
     const int row = blockIdx.x*Br + blockIdx.y*seqLength;
@@ -41,8 +41,14 @@ __global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16*
     //Reg declaration
     uint32_t Qreg[blockQperWarp/MMA_M][d/MMA_K][4]; //4  16*16/32 following below logic (2  bf16 per reg)
     uint32_t Kreg[Bc/MMA_N][d/MMA_K][2];
-    uint32_t Sreg[blockQperWarp/MMA_M][Bc/MMA_N][4]; //fp32. So per warp total space/32 --> 16*8/32
-    float Oreg[blockQperWarp/MMA_M][d/MMA_K][4]; //4  is number of tiles per warp
+    float Sreg[blockQperWarp/MMA_M][Bc/MMA_N][4]; //fp32. So per warp total space/32 --> 16*8/32
+    float Oreg[blockQperWarp/MMA_M][d/MMA_K][4] = {}; //4  is number of tiles per warp
+
+    float rowMax[blockQperWarp/MMA_M][2]; 
+    for(int i=0; i<(blockQperWarp/MMA_M); i++)
+        rowMax[i] = {-INFINITY, -INFINITY};
+
+    float rowSumExp[blockQperWarp/MMA_M][2];
     //Global to shMem transfer
     //Load Q (Br*d)
     const int numElementsPerLoad = 8;
@@ -92,12 +98,86 @@ __global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16*
         {
             for(int j=0; j<(Bc/MMA_N); j++)
             {
-                for(int k=0; j<(d/MMA_K); k++)
+                for(int k=0; k<(d/MMA_K); k++)
                 {
                     mma_m16n8k16(Sreg[i][j], Qreg[i][k], Kreg[j][k]);
                 }
             }
         }
+
+        //Head scaling and Row max
+        for(int i=0; i<(blockQperWarp/MMA_M), i++)
+        {
+            for(int j=0; j<(Bc/MMA_N); j++)
+            {
+                for(int k=0; k<4; k++)
+                {
+                    Sreg[i][j][k] *= scaling_factor;
+                }
+            }
+            //row max, online softmax
+            float* maxTileRow = {-INFINTIY, -INFINITY};
+            for(int j=0; j<(Bc/MMA_N); j++)
+            {
+                float* tempReg = Sreg[i][j];
+                maxTileRow[0] = max(maxTileRow[0], max(tempReg[0], tempReg[1]));
+                maxTileRow[1] = max(maxTileRow[1], max(tempReg[2], tempReg[3]));
+            } //We close here as we get all the values pertianing to this row. No need separately. Clever
+
+            maxTileRow[0] = max(maxTileRow[0], __shfl_xor_sync('OxFFFFFFFF', maxTileRow[0], 1));
+            maxTileRow[0] = max(maxTileRow[0], __shfl_xor_sync('OxFFFFFFFF', maxTileRow[0], 2));
+            maxTileRow[1] = max(maxTileRow[1], __shfl_xor_sync('OxFFFFFFFF', maxTileRow[1], 1));
+            maxTileRow[1] = max(maxTileRow[1], __shfl_xor_sync('OxFFFFFFFF', maxTileRow[1], 2));
+            
+
+            maxTileRow[0] = max(maxTileRow[0], rowMax[i][0]);
+            maxTileRow[1] = max(maxTileRow[1], rowMax[i][1]);
+
+            //rescale
+            float rescale[2];
+            rescale[0] = expf(rowMax[i][0] - maxTileRow[0]);
+            rescale[1] = expf(rowMax[i][1] - maxTileRow[1]);
+
+            for(int j=0; j<(Bc/MMA_N); j++)
+            {
+                Oreg[i][j][0] *= rescale[0];
+                Oreg[i][j][1] *= rescale[0];
+                Oreg[i][j][2] *= rescale[1];
+                Oreg[i][j][3] *= rescale[1];
+            }
+
+            //copy max val for next MMN_N tile
+            rowMax[i][0] = maxTileRow[0];
+            rowMax[i][1] = maxTileRow[1];
+
+            //RowSumExp + Need to write P as uint32_t and not float in S. Also m16n8 needs to be converted to m16n16
+            float* sumexp = {0.0, 0.0};
+            for(int j=0; j<(Bc/MMA_N); j++)
+            {
+                S[i][j][0] = expf(S[i][j][0] - maxTileRow[0]);
+                S[i][j][1] = expf(S[i][j][1] - maxTileRow[0]);
+                S[i][j][2] = expf(S[i][j][0] - maxTileRow[1]);
+                S[i][j][3] = expf(S[i][j][1] - maxTileRow[1]);
+
+                sumexp[0] += S[i][j][0] + S[i][j][1];
+                sumexp[1] += S[i][j][2] + S[i][j][3];
+            }
+
+            sumexp[0] += __shfl_xor_sync('0xFFFFFFFF', sumexp[0], 1);
+            sumexp[0] += __shfl_xor_sync('0xFFFFFFFF', sumexp[0], 2);
+            sumexp[1] += __shfl_xor_sync('0xFFFFFFFF', sumexp[1], 1);
+            sumexp[1] += __shfl_xor_sync('0xFFFFFFFF', sumexp[1], 2);
+            
+
+            rowSumExp[i][0] = rowSumExp[i][0]*rescale[0] +  sumexp[0];
+            rowSumExp[i][1] = rowSumExp[i][1]*rescale[1] + sumexp[1];
+
+
+            
+
+        }
+
+
 
         K += Bc*d;
         V += Bc*d;
