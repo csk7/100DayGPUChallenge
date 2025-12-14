@@ -1,14 +1,16 @@
 #include<iostream>
-#include<cassert>
 #include<cuda.h>
 #include<cuda_bf16.h>
+#include<cstdint>
 
 #include"common.cuh"
 
+using namespace std;
+
 /* Inputs are Q-> B, L, d and KV-> B, L, d and output is B, L, d*/
 
-template<const int batchSize = 1, const int Br=128, const int Bc=128, const int d=128, const int numThreads = 128, const float scaling_factor = 0.088> 
-__global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, const nv_bfloat16* V, nv_bfloat16* O, const int seqLength)
+template<const int Br=128, const int Bc=128, const int d=128, const int WARPSIZE=32> 
+__global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, const nv_bfloat16* V, nv_bfloat16* O, const int seqLength, int batchSize)
 {
     const int row = blockIdx.x*Br + blockIdx.y*seqLength;
     if((blockIdx.x>batchSize) or ((blockIdx.z*Br)>seqLength))
@@ -52,11 +54,11 @@ __global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16*
         rowMax[i] = {-INFINITY, -INFINITY};
 
     float rowSumExp[blockQperWarp/MMA_M][2];
+
+    const float scaling_factor = rsqrtf(static_cast<float>(DIM));
     //Global to shMem transfer
     //Load Q (Br*d)
     const int numElementsPerLoad = 8;
-    assert((numElementsPerLoad*2) == 4 or (numElementsPerLoad*2) == 8 or (numElementsPerLoad*2) == 16);
-    assert(numThreads >= (d/numElementsPerLoad));
 
     globalToShared<Br, d>(QshMem, Q, numElementsPerLoad);
     asm volatile("cp.async.commit_group;\n");
@@ -243,7 +245,24 @@ __global__ void __launch_bounds__(numThreads) flashAttention2(const nv_bfloat16*
 }
 
 
+void flashAttention2_v1(const nv_bfloat16* Q, const nv_bfloat16* K, const nv_bfloat16* V, const nv_bfloat16* O, int seqLength, int batchSize)
+{
+    const int Br = 128;
+    const int Bc = 64;
+    const int d = 128;
+    const int threadsPerBlock = 128;
 
+    dim3 threadsPerBlock(threadsPerBlock, 1, 1);
+    dim3 blocksPerKernel(CEIL_DIV(seqLength, Br), batchSize, 1);
+    const int shMemSize = max(Br, 2*Bc)*d*sizeof(nv_bfloat16);
+
+    flashAttention2<Br, Bc, d><<<blocksPerKernel, threadsPerBlock>>>(Q, K, V, O, seqLength, batchSize);
+
+    return O;
+
+}
+
+/*
 int main()
 {
     const int batchSize=1;
@@ -317,3 +336,4 @@ int main()
 
     printf("\n");
 }
+*/
