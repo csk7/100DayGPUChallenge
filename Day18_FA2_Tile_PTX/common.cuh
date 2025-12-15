@@ -4,12 +4,12 @@
 
 #include <cuda_bf16.h>
 #define CEIL_DIV(M,N) (((M)+(N)-1)/(N))
-__device__ void globalToShared(uint32_t dstAddr, const nv_bfloat16* srcAddr, int numElementsPerLoad=8)
+/*__device__ void globalToShared(uint32_t dstAddr, const nv_bfloat16* srcAddr, int numElementsPerLoad=8)
 {
     asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
         :
         : "r"(dstAddr), "l"(srcAddr), "n"(16));    
-}
+}*/
 
 template<const int HEIGHT, const int WIDTH>
 __device__ __inline__ void globalToShared(uint32_t dstAddrBase, const nv_bfloat16* srcAddrBase, int elemPerThread)
@@ -38,7 +38,7 @@ __device__ inline void sharedToRegx4(uint32_t regArray[4], uint32_t srcShAddr)
 {
     printf("In function Reg by thread %d is {%d,%d,%d,%d} \n", threadIdx.x, regArray[0], regArray[1], regArray[2], regArray[3]);
 
-    nv_bfloat162 tempPrint1 = reinterpret_cast<nv_bfloat162*>(__cvta_shared_to_generic(srcShAddr + (0)*sizeof(nv_bfloat162)))[0];
+    /*nv_bfloat162 tempPrint1 = reinterpret_cast<nv_bfloat162*>(__cvta_shared_to_generic(srcShAddr + (0)*sizeof(nv_bfloat162)))[0];
     nv_bfloat162 tempPrint2 = reinterpret_cast<nv_bfloat162*>(__cvta_shared_to_generic(srcShAddr + (1)*sizeof(nv_bfloat162)))[0];
     nv_bfloat162 tempPrint3 = reinterpret_cast<nv_bfloat162*>(__cvta_shared_to_generic(srcShAddr + (2)*sizeof(nv_bfloat162)))[0];
     nv_bfloat162 tempPrint4 = reinterpret_cast<nv_bfloat162*>(__cvta_shared_to_generic(srcShAddr + (3)*sizeof(nv_bfloat162)))[0];
@@ -47,26 +47,24 @@ __device__ inline void sharedToRegx4(uint32_t regArray[4], uint32_t srcShAddr)
     float2 tempPrintFloat3 = __bfloat1622float2(tempPrint3);
     float2 tempPrintFloat4 = __bfloat1622float2(tempPrint4);
     printf("thread Val : %d with address %d with vals: %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f\n", threadIdx.x, srcShAddr, tempPrintFloat1.x, tempPrintFloat1.y, tempPrintFloat2.x, tempPrintFloat2.y,
-        tempPrintFloat3.x, tempPrintFloat3.y, tempPrintFloat4.x, tempPrintFloat4.y);
+        tempPrintFloat3.x, tempPrintFloat3.y, tempPrintFloat4.x, tempPrintFloat4.y);*/
 
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.b16 {%0, %1, %2, %3}, [%4];\n" //x4 is number of tiles to load
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n" //x4 is number of tiles to load
         :"=r"(regArray[0]), "=r"(regArray[1]), "=r"(regArray[2]), "=r"(regArray[3])
         :"r"(srcShAddr));
-
-    printf("Hello3");
     
 }
 
 __device__ __inline__ void sharedToRegx2(uint32_t regArray[2], const uint32_t srcAddr)
 {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x2.b16 {%0, %1}, [%2];\n"
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\n"
         :"=r"(regArray[0]), "=r"(regArray[1])
         :"r"(srcAddr));
 }
 
 __device__ __inline__ void sharedToRegx2Trans(uint32_t regs[2], const uint32_t srcAddr)
 {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.b16 {%0, %1}, [%2];\n"
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.trans.b16 {%0, %1}, [%2];\n"
     :"=r"(regs[0]),"=r"(regs[1])
     :"r"(srcAddr));
 }
