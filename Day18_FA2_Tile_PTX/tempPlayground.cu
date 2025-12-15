@@ -25,10 +25,13 @@ __global__ void bfloat16playGround(nv_bfloat16* dA, nv_bfloat16* dB, nv_bfloat16
     nv_bfloat162 tmpY = make_bfloat162(PshMemPtr[2], PshMemPtr[3]);
     nv_bfloat162 tmpZ = make_bfloat162(PshMemPtr[4], PshMemPtr[5]);
     nv_bfloat162 tmpW = make_bfloat162(PshMemPtr[6], PshMemPtr[7]);
-    reinterpret_cast<nv_bfloat162 *>(&dC[threadIdx.x*8])[0] = tmpX;
-    reinterpret_cast<nv_bfloat162 *>(&dC[threadIdx.x*8+2])[0] = tmpY;
-    reinterpret_cast<nv_bfloat162 *>(&dC[threadIdx.x*8+4])[0] = tmpZ;
-    reinterpret_cast<nv_bfloat162 *>(&dC[threadIdx.x*8+6])[0] = tmpW;
+    reinterpret_cast<nv_bfloat162 *>(dC[threadIdx.x*8])[0] = tmpX;
+    reinterpret_cast<nv_bfloat162 *>(dC[threadIdx.x*8+2])[0] = tmpY;
+    reinterpret_cast<nv_bfloat162 *>(dC[threadIdx.x*8+4])[0] = tmpZ;
+    reinterpret_cast<nv_bfloat162 *>(dC[threadIdx.x*8+6])[0] = tmpW;
+
+    
+    
 }
 
 int main()
