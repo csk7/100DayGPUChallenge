@@ -47,9 +47,9 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
     uint32_t Qreg[blockQperWarp/MMA_M][d/MMA_K][4]; //4  16*16/32 following below logic (2  bf16 per reg)
     uint32_t Kreg[Bc/MMA_N][d/MMA_K][2];
     uint32_t Vreg[Bc/MMA_K][d/MMA_N][2];
-    uint32_t Preg[Bc/MMA_K][d/MMA_N][4];
+    uint32_t Preg[blockQperWarp/MMA_M][Bc/MMA_K][4];
     //float Sreg[blockQperWarp/MMA_M][Bc/MMA_N][4]; //fp32. So per warp total space/32 --> 16*8/32
-    float Oreg[blockQperWarp/MMA_M][d/MMA_K][4] = {}; //4  is number of tiles per warp
+    float Oreg[blockQperWarp/MMA_M][d/MMA_N][4] = {}; //4  is number of tiles per warp
 
     float rowMax[blockQperWarp/MMA_M][2]; 
     for(int i=0; i<(blockQperWarp/MMA_M); i++)
