@@ -36,7 +36,6 @@ __device__ __inline__ void globalToShared(uint32_t dstAddrBase, const nv_bfloat1
 
 __device__ inline void sharedToRegx4(uint32_t regArray[4], uint32_t srcShAddr)
 {
-    printf("In function Reg by thread %d is {%d,%d,%d,%d} \n", threadIdx.x, regArray[0], regArray[1], regArray[2], regArray[3]);
 
     /*nv_bfloat162 tempPrint1 = reinterpret_cast<nv_bfloat162*>(__cvta_shared_to_generic(srcShAddr + (0)*sizeof(nv_bfloat162)))[0];
     nv_bfloat162 tempPrint2 = reinterpret_cast<nv_bfloat162*>(__cvta_shared_to_generic(srcShAddr + (1)*sizeof(nv_bfloat162)))[0];

@@ -21,8 +21,8 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
     }
     //Block pointer moved
     Q += row*d;
-    K += (blockDim.y*seqLength)*d;
-    V += (blockDim.y*seqLength)*d;
+    //K += (blockDim.y*seqLength)*d;
+    //V += (blockDim.y*seqLength)*d;
     O += row*d;
 
     //Shared Mem declaration
@@ -59,6 +59,11 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
     }
 
     float rowSumExp[blockQperWarp/MMA_M][2];
+    for(int i=0; i<(blockQperWarp/MMA_M); i++)
+    {
+        rowSumExp[i][0] = 0.0;
+        rowSumExp[i][1] = 0.0;
+    }
 
     const float scaling_factor = rsqrtf(static_cast<float>(d));
     //Global to shMem transfer
@@ -71,22 +76,7 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
     asm volatile("cp.async.wait_all;\n");
     __syncthreads();
 
-    if(threadIdx.x == 0 and blockIdx.y == 0 and blockIdx.x == 0)
-    {
-        for(int i=0; i<16; i++)
-        {
-            for(int j=0; j<8; j++)
-            {
-                nv_bfloat162 tempPrint = reinterpret_cast<nv_bfloat162*>(__cvta_shared_to_generic(QshMem + (i*8 + j)*sizeof(nv_bfloat162)))[0];
-                float2 tempPrintFloat = __bfloat1622float2(tempPrint);
-                printf("%.3f, %.3f, ", tempPrintFloat.x, tempPrintFloat.y);
-            }
-            printf("\n");
-        }
-    }
-    __syncthreads();
-
-
+    
     for(int mma_id_row=0; mma_id_row<(blockQperWarp/MMA_M); mma_id_row++)
     {
         for(int mma_id_col=0; mma_id_col<(d/MMA_K); mma_id_col++)
@@ -100,8 +90,6 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
     
     __syncthreads();
 
-    if(threadIdx.x == 0)
-        printf("Hello4 \n");
 
     for(int idx_KV = 0; idx_KV<seqLength; idx_KV+=Bc)
     {
@@ -111,6 +99,7 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_all;\n");
         __syncthreads();
+        
 
         //Shared to Reg
         for(int mma_id_row=0; mma_id_row<Bc; mma_id_row+=MMA_N)
@@ -123,9 +112,8 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
                 sharedToRegx2(Kreg[mma_id_row/MMA_N][mma_id_col/MMA_K], srcShAddress);
             }
         }
-
-        if(threadIdx.x == 0)
-            printf("Hello5 \n");
+        
+        __syncthreads();
 
         //MMA
         for(int i=0; i<(blockQperWarp/MMA_M); i++)
@@ -138,9 +126,10 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
                 }
             }
         }
+        __syncthreads();
+        //printf("Row,Col %d,%d , %.3f, %.3f\n",threadIdx.x/4, (threadIdx.x%4)*2+8, Sreg[0][1][0], Sreg[0][1][1]);
+        //printf("Row,Col %d,%d , %.3f, %.3f\n",(threadIdx.x/4) + 8, (threadIdx.x%4)*2+8, Sreg[0][1][2], Sreg[0][1][3]);
 
-        if(threadIdx.x == 0)
-            printf("Hello6 \n");
 
         //Head scaling and Row max
         for(int i=0; i<(blockQperWarp/MMA_M); i++)
@@ -161,25 +150,22 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
                 maxTileRow[1] = max(maxTileRow[1], max(tempReg[2], tempReg[3]));
             } //We close here as we get all the values pertianing to this row. No need separately. Clever
 
-            if(threadIdx.x == 0)
-                printf("Hello7 \n");
-
             maxTileRow[0] = max(maxTileRow[0], __shfl_xor_sync(0xffffffff, maxTileRow[0], 1));
             maxTileRow[0] = max(maxTileRow[0], __shfl_xor_sync(0xffffffff, maxTileRow[0], 2));
             maxTileRow[1] = max(maxTileRow[1], __shfl_xor_sync(0xffffffff, maxTileRow[1], 1));
             maxTileRow[1] = max(maxTileRow[1], __shfl_xor_sync(0xffffffff, maxTileRow[1], 2));
 
-            if(threadIdx.x == 0)
-                printf("Hello8 \n");
-            
+            __syncthreads();
 
             maxTileRow[0] = max(maxTileRow[0], rowMax[i][0]);
             maxTileRow[1] = max(maxTileRow[1], rowMax[i][1]);
 
+            
+            __syncthreads();
             //rescale
             float rescale[2];
-            rescale[0] = expf(rowMax[i][0] - maxTileRow[0]);
-            rescale[1] = expf(rowMax[i][1] - maxTileRow[1]);
+            rescale[0] = __expf(rowMax[i][0] - maxTileRow[0]);
+            rescale[1] = __expf(rowMax[i][1] - maxTileRow[1]);
 
             for(int j=0; j<(Bc/MMA_N); j++)
             {
@@ -193,17 +179,14 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
             rowMax[i][0] = maxTileRow[0];
             rowMax[i][1] = maxTileRow[1];
 
-            if(threadIdx.x == 0)
-                printf("Hello9 \n");
-
             //RowSumExp + Need to write P as uint32_t and not float in S. Also m16n8 needs to be converted to m16n16
             float sumexp[2] = {0.0, 0.0};
             for(int j=0; j<(Bc/MMA_N); j++)
             {
-                Sreg[i][j][0] = expf(Sreg[i][j][0] - rowMax[i][0]);
-                Sreg[i][j][1] = expf(Sreg[i][j][1] - rowMax[i][0]);
-                Sreg[i][j][2] = expf(Sreg[i][j][0] - rowMax[i][1]);
-                Sreg[i][j][3] = expf(Sreg[i][j][1] - rowMax[i][1]);
+                Sreg[i][j][0] = __expf(Sreg[i][j][0] - rowMax[i][0]);
+                Sreg[i][j][1] = __expf(Sreg[i][j][1] - rowMax[i][0]);
+                Sreg[i][j][2] = __expf(Sreg[i][j][2] - rowMax[i][1]);
+                Sreg[i][j][3] = __expf(Sreg[i][j][3] - rowMax[i][1]);
 
                 //row sum in same tx
                 sumexp[0] += Sreg[i][j][0] + Sreg[i][j][1];
@@ -224,12 +207,21 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
             sumexp[1] += __shfl_xor_sync(0xffffffff, sumexp[1], 1);
             sumexp[1] += __shfl_xor_sync(0xffffffff, sumexp[1], 2);
 
+            __syncthreads();
+
             if(threadIdx.x == 0)
                 printf("Hello11 \n");
             
 
-            rowSumExp[i][0] = rowSumExp[i][0]*rescale[0] +  sumexp[0];
+            rowSumExp[i][0] = rowSumExp[i][0]*rescale[0] + sumexp[0];
             rowSumExp[i][1] = rowSumExp[i][1]*rescale[1] + sumexp[1];
+            if(threadIdx.x%4 == 0)
+            {
+                printf("Max of Row %d is %.3f\n",threadIdx.x/4, rowSumExp[i][0]);
+                printf("Max of Row %d is %.3f\n",(threadIdx.x/4) + 8, rowSumExp[i][1]);
+            }
+
+            __syncthreads();
 
             if(threadIdx.x == 0)
                 printf("Hello12 \n");
@@ -239,6 +231,21 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
         globalToShared<Bc, d>(VshMem, V, numElementsPerLoad);
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_all;\n");
+        __syncthreads();
+        /*if(threadIdx.x == 0 and blockIdx.y == 0 and blockIdx.x == 0)
+        {
+            for(int i=0; i<16; i++)
+            {
+                for(int j=0; j<8; j++)
+                {
+                    nv_bfloat162 tempPrint = reinterpret_cast<nv_bfloat162*>(__cvta_shared_to_generic(VshMem + (i*8 + j)*sizeof(nv_bfloat162)))[0];
+                    float2 tempPrintFloat = __bfloat1622float2(tempPrint);
+                    printf("%.3f, %.3f, ", tempPrintFloat.x, tempPrintFloat.y);
+                }
+                printf("\n");
+            }
+        }
+        __syncthreads();*/
 
         if(threadIdx.x == 0)
                 printf("Hello13 \n");
@@ -253,6 +260,7 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
                 sharedToRegx2Trans(Vreg[mma_i_row][mma_j_col], srcAddr);
             }
         }
+        __syncthreads();
 
         if(threadIdx.x == 0)
                 printf("Hello14 \n");
@@ -268,6 +276,7 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
                 }
             }
         }
+        __syncthreads();
 
         if(threadIdx.x == 0)
                 printf("Hello15 \n");
@@ -276,6 +285,7 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
 
         K += Bc*d;
         V += Bc*d;
+        __syncthreads();
     }
 
     for(int mma_id_row=0; mma_id_row<(blockQperWarp/MMA_M); mma_id_row++)
@@ -286,7 +296,7 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
             //Tx 0 gets 4 outputs. Row0, Col0, Col1 stored in Reg0 and Reg1 as fp32. If it was bf16 then Both in reg0. 
             //Only half the ouput regs are written by a tx in one row. Other half to m16/2 row. In fp32 you need 4 tx to fill a row. 
             //Each tx rows are current row + m16/2.   
-            const int idxCol = mma_id_col*MMA_K + (laneId%4)*2; //2 as each row is writing 2 elems. 8 n8 so %4.  
+            const int idxCol = mma_id_col*MMA_N + (laneId%4)*2; //2 as each row is writing 2 elems. 8 n8 so %4.  
             
             //scaling softmax sum
             float* temp = Oreg[mma_id_row][mma_id_col];
@@ -328,9 +338,16 @@ void flashAttention2_v1(const nv_bfloat16* Q, const nv_bfloat16* K, const nv_bfl
     dim3 blocksPerKernel(CEIL_DIV(seqLength, Br), batchSize, 1);
     const int shMemSize = max(Br, 2*Bc)*d*sizeof(nv_bfloat16);
 
-    printf("Hello Cu Calling \n");
+    printf("Hello Cu Calling %d\n",batchSize);
 
+    cudaDeviceSynchronize();
     flashAttention2<Br, Bc, d, WARPSIZE, numThreads><<<blocksPerKernel, threadsPerBlock, shMemSize>>>(Q, K, V, O, seqLength, batchSize);
+    cudaDeviceSynchronize();
+    cudaError_t err = cudaGetLastError();
+    if(err!=cudaSuccess)
+    {
+        printf("Error : %s\n",cudaGetErrorString(err));
+    }
 
 }
 
