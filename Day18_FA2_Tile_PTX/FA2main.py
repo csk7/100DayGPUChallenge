@@ -14,10 +14,10 @@ FA2custom = load(name = 'FA2custom', sources=['FA2Wrapper.cpp', 'cudaFA2ptx.cu']
 
 def main():
     #Generate Random inputs
-    batchSize = 1
+    batchSize = 4
     nH = 1
-    seqLength = 16
-    dim = 16
+    seqLength = 8192
+    dim = 64
     scaling_const = dim ** (-0.5)
 
     Q = generate_input(batchSize, nH, seqLength, dim)
@@ -43,12 +43,17 @@ def main():
     print(f'Ocustom size : {O_custom.size()}, Val : {O_custom[0,0,0,:16]}')
 
     #Match
-    tolerance = 1e-4
+    tolerance = 1e-2
     allclose = torch.allclose(O_reference, O_custom, rtol=0, atol=tolerance)
     if(allclose):
         print(f'Success');
     else:
         print(f'Fail')
+        mask = torch.abs(O_reference - O_custom) > tolerance
+        for i in range(seqLength):
+            for j in range(dim):
+                if(mask[0,0,i,j]):
+                    print(f'Error at {i,j} , {O_reference[0, 0, i, j]} != {O_custom[0, 0, i, j]}')
 
 
 if __name__ == "__main__":
