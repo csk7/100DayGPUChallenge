@@ -9,7 +9,7 @@ AttentionFn flashAttention2_v1;
 template<AttentionFn attention>
 at::Tensor sdpa(const at::Tensor& Q, const at::Tensor& K, const at::Tensor& V)
 {
-    const int batchSize = Q.size(0);
+    const int batchSize = Q.size(0)*Q.size(1);
     const int seqLength = Q.size(2);
 
     at::Tensor O = at::zeros_like(Q);
@@ -18,8 +18,6 @@ at::Tensor sdpa(const at::Tensor& Q, const at::Tensor& K, const at::Tensor& V)
     auto K_ptr = reinterpret_cast<const nv_bfloat16*>(K.data_ptr());
     auto V_ptr = reinterpret_cast<const nv_bfloat16*>(V.data_ptr());
     auto O_ptr = reinterpret_cast<nv_bfloat16*>(O.data_ptr());
-
-    printf("Hello CPP \n");
 
     attention(Q_ptr, K_ptr, V_ptr, O_ptr, seqLength, batchSize);
 

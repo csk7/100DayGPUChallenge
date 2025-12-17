@@ -3,8 +3,6 @@
 #include<cstdint>
 #include<float.h>
 
-
-
 #include"common.cuh"
 
 using namespace std;
@@ -43,9 +41,8 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
     uint32_t Qreg[blockQperWarp/MMA_M][d/MMA_K][4]; //4  16*16/32 following below logic (2  bf16 per reg)
     uint32_t Kreg[Bc/MMA_N][d/MMA_K][2];
     uint32_t Vreg[Bc/MMA_K][d/MMA_N][2];
-    uint32_t Preg[blockQperWarp/MMA_M][Bc/MMA_K][4];
-    //float Sreg[blockQperWarp/MMA_M][Bc/MMA_N][4]; //fp32. So per warp total space/32 --> 16*8/32
-    float Oreg[blockQperWarp/MMA_M][d/MMA_N][4] = {}; //4  is 2*number of (8x8)tiles per warp
+    uint32_t Preg[blockQperWarp/MMA_M][Bc/MMA_K][4]; //Preg transforms MMA_N to MMA_K for second dim
+    float Oreg[blockQperWarp/MMA_M][d/MMA_N][4] = {}; //4  is 2*number of (8x8)tiles per warp. Oreg is for output so /MMA_N
 
     float rowMax[blockQperWarp/MMA_M][2]; 
     for(int i=0; i<(blockQperWarp/MMA_M); i++)
@@ -83,20 +80,18 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
             sharedToRegx4(Qreg[mma_id_row][mma_id_col], srcShAddress);
         }
     }
-    
     __syncthreads();
 
 
     for(int idx_KV = 0; idx_KV<seqLength; idx_KV+=Bc)
     {
-        float Sreg[blockQperWarp/MMA_M][Bc/MMA_N][4] = {};
+        float Sreg[blockQperWarp/MMA_M][Bc/MMA_N][4] = {}; //fp32. So per warp total space/32 --> 16*8/32
         //Load K (Bc*d), Global to Shared
         globalToShared<Bc, d>(KshMem, K, numElementsPerLoad);
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_all;\n");
         __syncthreads();
         
-
         //Shared to Reg
         for(int mma_id_row=0; mma_id_row<Bc; mma_id_row+=MMA_N)
         {
@@ -108,7 +103,6 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
                 sharedToRegx2(Kreg[mma_id_row/MMA_N][mma_id_col/MMA_K], srcShAddress);
             }
         }
-
         //MMA
         for(int i=0; i<(blockQperWarp/MMA_M); i++)
         {
@@ -120,13 +114,11 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
                 }
             }
         }
-        //printf("Row,Col %d,%d , %.3f, %.3f\n",threadIdx.x/4, (threadIdx.x%4)*2+8, Sreg[0][1][0], Sreg[0][1][1]);
-        //printf("Row,Col %d,%d , %.3f, %.3f\n",(threadIdx.x/4) + 8, (threadIdx.x%4)*2+8, Sreg[0][1][2], Sreg[0][1][3]);
 
-
-        //Head scaling and Row max
+        //Main loop for softmax and 2nd MMA fusion
         for(int i=0; i<(blockQperWarp/MMA_M); i++)
         {
+            //Head Dim
             for(int j=0; j<(Bc/MMA_N); j++)
             {
                 for(int k=0; k<4; k++)
@@ -135,7 +127,7 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
                 }
             }
             //row max, online softmax
-            float maxTileRow[2] = {-INFINITY, -INFINITY};
+            float maxTileRow[2] = {-INFINITY, -INFINITY}; //For current tile
             for(int j=0; j<(Bc/MMA_N); j++)
             {
                 float* tempReg = Sreg[i][j];
@@ -186,24 +178,14 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
                 this_Preg[(j%2)*2+1] = __float22bfloat162_rn({Sreg[i][j][2], Sreg[i][j][3]});
             }
 
-            //Rwo sum across tx
+            //Row sum across tx
             sumexp[0] += __shfl_xor_sync(0xffffffff, sumexp[0], 1);
             sumexp[0] += __shfl_xor_sync(0xffffffff, sumexp[0], 2);
             sumexp[1] += __shfl_xor_sync(0xffffffff, sumexp[1], 1);
             sumexp[1] += __shfl_xor_sync(0xffffffff, sumexp[1], 2);
 
-            
-
             rowSumExp[i][0] = rowSumExp[i][0]*rescale[0] + sumexp[0];
             rowSumExp[i][1] = rowSumExp[i][1]*rescale[1] + sumexp[1];
-            /*if(threadIdx.x%4 == 0)
-            {
-                printf("Max of Row %d is %.3f\n",threadIdx.x/4, rowSumExp[i][0]);
-                printf("Max of Row %d is %.3f\n",(threadIdx.x/4) + 8, rowSumExp[i][1]);
-            }
-
-            __syncthreads();*/
-
         }
 
         //Load V to registers
@@ -211,20 +193,6 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_all;\n");
         __syncthreads();
-        /*if(threadIdx.x == 0 and blockIdx.y == 0 and blockIdx.x == 0)
-        {
-            for(int i=0; i<16; i++)
-            {
-                for(int j=0; j<8; j++)
-                {
-                    nv_bfloat162 tempPrint = reinterpret_cast<nv_bfloat162*>(__cvta_shared_to_generic(VshMem + (i*8 + j)*sizeof(nv_bfloat162)))[0];
-                    float2 tempPrintFloat = __bfloat1622float2(tempPrint);
-                    printf("%.3f, %.3f, ", tempPrintFloat.x, tempPrintFloat.y);
-                }
-                printf("\n");
-            }
-        }
-        __syncthreads();*/
 
         for(int mma_i_row=0; mma_i_row<(Bc/MMA_K); mma_i_row++)
         {
@@ -248,12 +216,6 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
                 }
             }
         }
-
-        //if(threadIdx.x == 0)
-        //        printf("Hello15 \n");
-
-
-
         K += Bc*d;
         V += Bc*d;
     }
@@ -279,36 +241,20 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
             reinterpret_cast<nv_bfloat162*>(&O[(idxRow + 8)*d + idxCol])[0] = __float22bfloat162_rn({temp[2], temp[3]});
         }
     }
-
-    //if(threadIdx.x == 0)
-    //   printf("Hello16 \n");
-
-
 }
 
 
 void flashAttention2_v1(const nv_bfloat16* Q, const nv_bfloat16* K, const nv_bfloat16* V, nv_bfloat16* O, int seqLength, int batchSize)
-{
-    // Get CUDA runtime and driver versions
-    int runtimeVersion = 0;
-    int driverVersion = 0;
-    cudaRuntimeGetVersion(&runtimeVersion);
-    cudaDriverGetVersion(&driverVersion);
-    printf("CUDA Runtime Version: %d.%d\n", runtimeVersion / 1000, (runtimeVersion % 100) / 10);
-    printf("CUDA Driver Version: %d.%d\n", driverVersion / 1000, (driverVersion % 100) / 10);
-
-    
+{    
     const int Br = 128;
     const int Bc = 64;
-    const int d = 64;
+    const int d = 128;
     const int numThreads = 128;
     const int WARPSIZE = 32;
 
     dim3 threadsPerBlock(numThreads, 1, 1);
     dim3 blocksPerKernel(CEIL_DIV(seqLength, Br), batchSize, 1);
     const int shMemSize = max(Br, 2*Bc)*d*sizeof(nv_bfloat16);
-
-    printf("Hello Cu Calling %d\n",batchSize);
 
     cudaDeviceSynchronize();
     flashAttention2<Br, Bc, d, WARPSIZE, numThreads><<<blocksPerKernel, threadsPerBlock, shMemSize>>>(Q, K, V, O, seqLength, batchSize);
@@ -374,20 +320,5 @@ int main()
     {
         hO[i] = __bfloat162float(bf16_hO[i]);
     }
-    /*
-    bool flag = true;
-    for(int i=0; i<N; i++)
-    {
-        if(hQ[i] != hO[i])
-        {
-            printf("Error at loc %d, Input : %f != Output : %f\n", i, hQ[i], hO[i]);
-            flag = false;
-        }
-    }
-    if(flag == true)
-    {
-        printf("Success \n");
-    }
-    */
     printf("\n");
 }
