@@ -1,12 +1,15 @@
 import os
+import time
 import torch
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.cpp_extension import load
+from torch.profiler import profile, ProfilerActivity
+from triton.testing import do_bench
 
 torch.manual_seed(2026)
 
-FA2custom = load(name = 'FA2custom', sources=['flashAttentionWrapper.cpp', 'flashAttention2_v1.cu'], 
+FA2custom = load(name = 'FA2custom', sources=['flashAttentionWrapper.cpp', 'flashAttention2_v2.cu'], 
                     extra_cuda_cflags=['-arch=sm_86', '-lineinfo', '--ptxas-options=-v', '-O3', '--use_fast_math'], verbose = True)
 
 def generate_input(*shape):
@@ -64,10 +67,16 @@ def benchmark(func, *args):
     #Return output and time
     return output, avg_ms
 
+def new_bench(func, name, totalOps, *args):
+    time.sleep(1)
+    latency_ms = do_bench(lambda:func(*args), return_mode="median")
+    TFLOPS = (totalOps)/(latency_ms * 1e9)
+    print(f"{name} : {TFLOPS:.3f}")
+
 def main():
     #Generate Random inputs
     batchSize = 4
-    nH = 1
+    nH = 8
     seqLength = 8192
     dim = 128
     totalOps = 2*batchSize*nH*(seqLength*seqLength*dim + seqLength*dim*seqLength)
@@ -83,14 +92,17 @@ def main():
 
     #Custom
     torch.cuda.synchronize()
-    O_custom, custom_time = benchmark(FA2custom.sdpa_v1, Q, K, V);
+    O_custom, custom_time = benchmark(FA2custom.sdpa_v2, Q, K, V);
 
     #Match
     tolerance = 1e-2
     allclose = torch.allclose(O_reference, O_custom, rtol=0, atol=tolerance)
     if(allclose):
         print(f'Success')
-        print_speedups(totalOps, pytorch_time, custom_time)
+        #print_speedups(totalOps, pytorch_time, custom_time)
+        print(f"Speed of Light : 40.6")
+        for functionIdx, nameIdx in zip([F.scaled_dot_product_attention, FA2custom.sdpa_v2],["Pytorch","Custom"]):
+            new_bench(functionIdx, nameIdx, totalOps, Q, K, V)
     else:
         print(f'Fail')
         print_mismatch(O_reference, O_custom, tolerance)

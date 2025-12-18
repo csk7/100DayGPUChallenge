@@ -63,8 +63,29 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
     //Load Q (Br*d)
     const int numElementsPerLoad = 8;
 
+    uint32_t QshMemSwizzle, KshMemSwizzle, VshMemSwizzle;
+    //Q Shared to Reg Index pre compute some address and xor
+    {//To reduce register use
+        const int idxRowQ = warpId*blockQperWarp + laneId%16;
+        const int idxColQ = (laneId/16)*8;
+        QshMemSwizzle = swizzle<d*sizeof(nv_bfloat16)>(QshMem + (idxRowQ*d + idxColQ)*sizeof(nv_bfloat16));
+    }
+    //K Swizzle
+    {
+        const int idxRowK = laneId%8;
+        const int idxColK = laneId/8*8;
+        KshMemSwizzle = swizzle<d*sizeof(nv_bfloat16)>(KshMem + (idxRowK*d + idxColK)*sizeof(nv_bfloat16));
+    }
+    {
+        const int idxRowV = laneId%16;
+        const int idxColV = laneId/16*8;
+        VshMemSwizzle = swizzle<d*sizeof(nv_bfloat16)>(VshMem + (idxRowV*d + idxColV)*sizeof(nv_bfloat16));
+    }
+    
+    
+
     //Start - Load Q
-    globalToShared<Br, d>(QshMem, Q, numElementsPerLoad);
+    globalToSharedSwizzle<Br, d>(QshMem, Q, numElementsPerLoad);
     asm volatile("cp.async.commit_group;\n");
     asm volatile("cp.async.wait_all;\n");
     __syncthreads();
@@ -74,9 +95,9 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
     {
         for(int mma_id_col=0; mma_id_col<(d/MMA_K); mma_id_col++)
         {
-            const int idxRow = warpId*blockQperWarp + mma_id_row*MMA_M + laneId%16; //16 is a function of how many tiles (rowWise) are there in the m8n8 load matrix. 2 tiles(2*m8) so 16
-            const int idxCol = mma_id_col*MMA_K + (laneId/16)*8; //16 --> from above, ldMatrix m8n8. n8 contributes to this;
-            const uint32_t srcShAddress = QshMem + (idxRow*d + idxCol)*sizeof(nv_bfloat16);
+            uint32_t srcShAddress = QshMemSwizzle;
+            srcShAddress += mma_id_row*MMA_M*d*sizeof(nv_bfloat16); //16 is a function of how many tiles (rowWise) are there in the m8n8 load matrix. 2 tiles(2*m8) so 16
+            srcShAddress ^= mma_id_col*MMA_K*sizeof(nv_bfloat16); //16 --> from above, ldMatrix m8n8. n8 contributes to this;
             sharedToRegx4(Qreg[mma_id_row][mma_id_col], srcShAddress);
         }
     }
@@ -87,7 +108,7 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
     {
         float Sreg[blockQperWarp/MMA_M][Bc/MMA_N][4] = {}; //fp32. So per warp total space/32 --> 16*8/32
         //Load K (Bc*d), Global to Shared
-        globalToShared<Bc, d>(KshMem, K, numElementsPerLoad);
+        globalToSharedSwizzle<Bc, d>(KshMem, K, numElementsPerLoad);
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_all;\n");
         __syncthreads();
@@ -97,9 +118,9 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
         {
             for(int mma_id_col=0; mma_id_col<d; mma_id_col+=MMA_K)
             {
-                const int idxRow = mma_id_row + laneId%8; //8 is a function of how many tiles (rowWise) are there in the [m8]n8 load matrix
-                const int idxCol = mma_id_col + laneId/8*8; //Second 8 is a function of m8[n8] load matrix
-                const uint32_t srcShAddress = KshMem + (idxRow*d + idxCol)*sizeof(nv_bfloat16);
+                uint32_t srcShAddress = KshMemSwizzle;
+                srcShAddress += mma_id_row*d*sizeof(nv_bfloat16); //8 is a function of how many tiles (rowWise) are there in the [m8]n8 load matrix
+                srcShAddress ^= mma_id_col*sizeof(nv_bfloat16); //Second 8 is a function of m8[n8] load matrix
                 sharedToRegx2(Kreg[mma_id_row/MMA_N][mma_id_col/MMA_K], srcShAddress);
             }
         }
@@ -189,7 +210,7 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
         }
 
         //Load V to registers
-        globalToShared<Bc, d>(VshMem, V, numElementsPerLoad);
+        globalToSharedSwizzle<Bc, d>(VshMem, V, numElementsPerLoad);
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_all;\n");
         __syncthreads();
@@ -198,10 +219,10 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
         {
             for(int mma_j_col=0; mma_j_col<(d/MMA_N); mma_j_col++)
             {
-                const int idxRow = mma_i_row*MMA_K + laneId%16;
-                const int idxCol = mma_j_col*MMA_N + laneId/16*8;
-                const uint32_t srcAddr = VshMem + (idxRow*d + idxCol)*sizeof(nv_bfloat16);
-                sharedToRegx2Trans(Vreg[mma_i_row][mma_j_col], srcAddr);
+                uint32_t srcShAddress = VshMemSwizzle;
+                srcShAddress += mma_i_row*MMA_K*d*sizeof(nv_bfloat16);
+                srcShAddress ^= mma_j_col*MMA_N*sizeof(nv_bfloat16);
+                sharedToRegx2Trans(Vreg[mma_i_row][mma_j_col], srcShAddress);
             }
         }
 
@@ -244,7 +265,7 @@ __global__ void flashAttention2(const nv_bfloat16* Q, const nv_bfloat16* K, cons
 }
 
 
-void flashAttention2_v1(const nv_bfloat16* Q, const nv_bfloat16* K, const nv_bfloat16* V, nv_bfloat16* O, int seqLength, int batchSize)
+void flashAttention2_v2(const nv_bfloat16* Q, const nv_bfloat16* K, const nv_bfloat16* V, nv_bfloat16* O, int seqLength, int batchSize)
 {    
     const int Br = 64;
     const int Bc = 32;
