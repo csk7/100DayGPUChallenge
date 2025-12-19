@@ -9,7 +9,8 @@ from triton.testing import do_bench
 
 torch.manual_seed(2026)
 
-FA2custom = load(name = 'FA2custom', sources=['flashAttentionWrapper.cpp', 'flashAttention2_v2.cu'], 
+FA2custom = load(name = 'FA2custom', sources=['flashAttentionWrapper.cpp', 'flashAttention2_v1.cu', 'flashAttention2_v2.cu', 
+                    'flashAttention2_v3.cu', 'flashAttention2_v4.cu'], 
                     extra_cuda_cflags=['-arch=sm_86', '-lineinfo', '--ptxas-options=-v', '-O3', '--use_fast_math'], verbose = True)
 
 def generate_input(*shape):
@@ -92,7 +93,7 @@ def main():
 
     #Custom
     torch.cuda.synchronize()
-    O_custom, custom_time = benchmark(FA2custom.sdpa_v2, Q, K, V);
+    O_custom, custom_time = benchmark(FA2custom.sdpa_v4, Q, K, V);
 
     #Match
     tolerance = 1e-2
@@ -101,11 +102,11 @@ def main():
         print(f'Success')
         #print_speedups(totalOps, pytorch_time, custom_time)
         print(f"Speed of Light : 40.6")
-        for functionIdx, nameIdx in zip([F.scaled_dot_product_attention, FA2custom.sdpa_v2],["Pytorch","Custom"]):
+        for functionIdx, nameIdx in zip([F.scaled_dot_product_attention, FA2custom.sdpa_v4],["Pytorch","Custom"]):
             new_bench(functionIdx, nameIdx, totalOps, Q, K, V)
     else:
         print(f'Fail')
-        print_mismatch(O_reference, O_custom, tolerance)
+        #print_mismatch(O_reference, O_custom, tolerance)
 
 
 if __name__ == "__main__":

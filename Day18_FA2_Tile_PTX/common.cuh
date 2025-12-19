@@ -8,7 +8,7 @@
 template<const int STRIDE=128>
 __device__ __inline__ uint32_t swizzle(uint32_t addr)
 {
-    if(STRIDE < 16) //Stride is [DIM*nv_bfloat16]
+    if(STRIDE < 16) //Stride is [d*nv_bfloat16]
         return addr;
 
     const int row_index = (addr/STRIDE)%8; //Get row idx first from full address; 8 because we access 8x8 tiles. 8 rows. 0,1,2,3
@@ -70,6 +70,13 @@ __device__ __inline__ void sharedToRegx2Trans(uint32_t regs[2], const uint32_t s
 {
     asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.trans.b16 {%0, %1}, [%2];\n"
     :"=r"(regs[0]),"=r"(regs[1])
+    :"r"(srcAddr));
+}
+
+__device__ __inline__ void sharedToRegx4Trans(uint32_t regs[4], const uint32_t srcAddr)
+{
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.trans.b16 {%0, %1, %2, %3}, [%4];\n"
+    :"=r"(regs[0]),"=r"(regs[1]),"=r"(regs[2]),"=r"(regs[3])
     :"r"(srcAddr));
 }
 

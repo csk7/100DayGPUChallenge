@@ -4,8 +4,10 @@
 
 using AttentionFn = void(const nv_bfloat16* Q, const nv_bfloat16* K, const nv_bfloat16* V, nv_bfloat16* O, int seqLength, int batchSize);
 
-//AttentionFn flashAttention2_v1;
+AttentionFn flashAttention2_v1;
 AttentionFn flashAttention2_v2;
+AttentionFn flashAttention2_v3;
+AttentionFn flashAttention2_v4;
 
 
 template<AttentionFn attention>
@@ -29,6 +31,8 @@ at::Tensor sdpa(const at::Tensor& Q, const at::Tensor& K, const at::Tensor& V)
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) 
 {
-    //m.def("sdpa_v1", torch::wrap_pybind_function(&sdpa<flashAttention2_v1>));
+    m.def("sdpa_v1", torch::wrap_pybind_function(&sdpa<flashAttention2_v1>));
     m.def("sdpa_v2", torch::wrap_pybind_function(&sdpa<flashAttention2_v2>));
+    m.def("sdpa_v3", torch::wrap_pybind_function(&sdpa<flashAttention2_v3>));
+    m.def("sdpa_v4", torch::wrap_pybind_function(&sdpa<flashAttention2_v4>));
 }
