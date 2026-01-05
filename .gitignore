@@ -4,3 +4,4 @@
 *.nsys-rep
 build/*
 *.json
+*.pyc
