@@ -30,9 +30,11 @@ def triton_add(a, b, c, M, N):
     bM = 2
     bN = 4
 
-    grid = (ceil_div(M,bM), ceil_div(N,bN))
+    dict_launch = {'bM':bM, 'bN':bN}
 
-    add_kernel[grid](a, b, c, M, N, bM, bN)
+    grid = lambda meta : (ceil_div(M,meta['bM']), ceil_div(N,meta['bN']))
+
+    add_kernel[grid(dict_launch)](a, b, c, M, N, bM, bN)
 
 def main():
     M = 10
