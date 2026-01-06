@@ -63,27 +63,41 @@ def conv2d_kernel(input_features_ptr, kernel_ptr, output_features_ptr, B, c_in, 
         tl.expand_dims(mask_r,1)*S + tl.expand_dims(mask_s,0) 
 
     #Output offset and mask
-    offset_h_out = pid0*bm + tl.arange()
+    offset_h_out = pid0*(bm-R+1) + tl.arange(bm-R+1)
+    offset_w_out = pid1*(bn-S+1) + tl.arange(bn-S+1) 
+
+    mask_h_out = offset_h_out < H_out
+    mask_w_out = offset_w_out < W_out
+
     offset_output = tl.expand_dims(offset_b,3)*(c_out*H*W) + tl.expand_dims(offset_c_out,2)*(H_out*W_out) + \
         tl.expand_dims(offset_h_out, 1)*W_out + tl.expand_dims(offset_w_out,0)
 
     mask_output = tl.expand_dims(mask_b,3) & tl.expand_dims(mask_c_out,2) &\
-        tl.expand_dims(mask_1d_m,1) & tl.expand_dims(mask_1d_n, 0)
+        tl.expand_dims(mask_h_out,1) & tl.expand_dims(mask_w_out, 0)
 
     #Read Inputs
     input_features_slice = tl.load(input_features_ptr + offset_input, mask=mask_input)
     kernel = tl.load(kernel_ptr + offset_kernel, mask=mask_kernel)
 
     #Convert to 2d vals
-    temp_input = tl.zeros((B, c_out))
+    #Features is B,Cin,bm,bn ; Kernels Cout, Cin, R, S
+    temp_input = tl.zeros(B,((bm-R+1)*(bn-S+1)), c_in*R*S, dtype=tl.float32, device = 'cuda')
+    for idx_row in range(bm-R+1):
+        for idx_col in range(bn-S+1):
+            temp_input[:,idx_row*(bn-S+1) + idx_col,:] = \
+                input_features_slice[:,:,idx_row:idx_row+R:idx_col+idx_col+S].reshape(B,c_in*R*S).unsqueeze(1)
+    temp_input = temp_input.reshape(B*((bm-R+1)*(bn-S+1)), c_in*R*S)
+    kernel  =  tl.trans(kernel.reshape(c_out,c_in*R*S))
     
     #Matmul
+    output_val = tl.dot(temp_input, kernel) #(B*bm_out*bn_out, cout)
 
     #Convert back to correct shape
+    output_val = output_val.reshape(B, (bm-R+1),(bn-S+1), c_out)
+    output_val = tl.trans(output_val, 0, 3, 1, 2)
 
     #Write result
-
-    
+    tl.store(output_features_ptr + offset_output, output_val, mask_output)
 
 
 def conv2d_triton(input_features:torch.Tensor, kernel:torch.Tensor, bm:int = 4,  bn:int = 4):
