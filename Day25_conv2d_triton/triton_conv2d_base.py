@@ -22,8 +22,16 @@ class Conv2dPytorch(nn.Module):
         return self.layers(x)
 
 @triton.jit
-def conv2d_kernel(input_features_ptr, kernel_ptr, output_features_ptr, B, c_in:tl.constexpr, H, W, c_out:tl.constexpr, R:tl.constexpr, S:tl.constexpr, H_out, W_out,
-    bm:tl.constexpr, bn:tl.constexpr, R_padded:tl.constexpr, S_padded:tl.constexpr, c_out_padded:tl.constexpr, 
+def conv2d_kernel(input_features_ptr, kernel_ptr, output_features_ptr, 
+    # Strides for flattened tensors (computed in Python)
+    stride_input_b, stride_input_c, stride_input_h, stride_input_w,
+    stride_kernel_cout, stride_kernel_cin, stride_kernel_r, stride_kernel_s,
+    stride_output_b, stride_output_cout, stride_output_h, stride_output_w,
+    # Dimensions
+    B, c_in:tl.constexpr, H, W, c_out:tl.constexpr, R:tl.constexpr, S:tl.constexpr, 
+    H_out, W_out, bm:tl.constexpr, bn:tl.constexpr, 
+    R_padded:tl.constexpr, S_padded:tl.constexpr, c_out_padded:tl.constexpr, 
+    B_padded:tl.constexpr, c_in_padded:tl.constexpr,
     h_out_padded:tl.constexpr, w_out_padded:tl.constexpr):
     pid0 = tl.program_id(0)
     pid1 = tl.program_id(1)
@@ -32,16 +40,17 @@ def conv2d_kernel(input_features_ptr, kernel_ptr, output_features_ptr, B, c_in:t
     offset_1d_m = pid0*bm + tl.arange(0,bm)
     offset_1d_n = pid1*bn + tl.arange(0,bn)
 
-    offset_c_in = tl.arange(0,1)
-    offset_b = tl.arange(0,1)
+    # Use padded sizes for tl.arange (power of 2 requirement)
+    offset_c_in = tl.arange(0, c_in_padded)
+    offset_b = tl.arange(0, B_padded)
 
     # Expand 1D tensors to 4D: (B, C, H, W)
-    # offset_b: (1,) -> (1, 1, 1, 1) - batch dim
-    # offset_c_in: (1,) -> (1, 1, 1, 1) - channel dim  
+    # offset_b: (B_padded,) -> (B_padded, 1, 1, 1) - batch dim
+    # offset_c_in: (c_in_padded,) -> (1, c_in_padded, 1, 1) - channel dim  
     # offset_1d_m: (bm,) -> (1, 1, bm, 1) - height dim
     # offset_1d_n: (bn,) -> (1, 1, 1, bn) - width dim
-    offset_b_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(offset_b, 0), 1), 2)
-    offset_c_in_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(offset_c_in, 0), 1), 2)
+    offset_b_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(offset_b, 1), 2), -1)
+    offset_c_in_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(offset_c_in, 0), 2), -1)
     offset_m_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(offset_1d_m, 0), 1), -1)
     offset_n_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(offset_1d_n, 0), 1), 2)
     
@@ -55,8 +64,8 @@ def conv2d_kernel(input_features_ptr, kernel_ptr, output_features_ptr, B, c_in:t
     mask_b = offset_b < B
 
     # Expand masks to 4D to match offset_input shape
-    mask_b_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(mask_b, 0), 1), 2)
-    mask_c_in_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(mask_c_in, 0), 1), 2)
+    mask_b_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(mask_b, 1), 2), -1)
+    mask_c_in_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(mask_c_in, 0), 2), -1)
     mask_m_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(mask_1d_m, 0), 1), -1)
     mask_n_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(mask_1d_n, 0), 1), 2)
     
@@ -73,10 +82,10 @@ def conv2d_kernel(input_features_ptr, kernel_ptr, output_features_ptr, B, c_in:t
     mask_c_out = offset_c_out < c_out
 
     # Expand kernel offsets to 4D: (c_out, c_in, R, S)
-    # offset_c_out: (c_out,) -> (c_out, 1, 1, 1)
-    # offset_c_in: (1,) -> (1, 1, 1, 1)
-    # offset_r: (R,) -> (1, 1, R, 1)
-    # offset_s: (S,) -> (1, 1, 1, S)
+    # offset_c_out: (c_out_padded,) -> (c_out_padded, 1, 1, 1)
+    # offset_c_in: (c_in_padded,) -> (1, c_in_padded, 1, 1)
+    # offset_r: (R_padded,) -> (1, 1, R_padded, 1)
+    # offset_s: (S_padded,) -> (1, 1, 1, S_padded)
     offset_c_out_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(offset_c_out, 1), 2), -1)
     offset_c_in_kernel_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(offset_c_in, 0), 2), -1)
     offset_r_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(offset_r, 0), 1), -1)
@@ -94,48 +103,76 @@ def conv2d_kernel(input_features_ptr, kernel_ptr, output_features_ptr, B, c_in:t
     mask_kernel = mask_c_out_4d & mask_c_in_kernel_4d & mask_r_4d & mask_s_4d 
 
     #Output offset and mask
-
+    # Create output indices: (B, c_out, h_out, w_out)
+    h_out_idx = tl.arange(0, h_out_padded)
+    w_out_idx = tl.arange(0, w_out_padded)
+    
+    # Expand to 4D: (B_padded, c_out_padded, h_out_padded, w_out_padded)
+    # offset_b: (B_padded,) -> (B_padded, 1, 1, 1)
+    # offset_c_out: (c_out_padded,) -> (1, c_out_padded, 1, 1)
+    # h_out_idx: (h_out_padded,) -> (1, 1, h_out_padded, 1)
+    # w_out_idx: (w_out_padded,) -> (1, 1, 1, w_out_padded)
+    offset_b_out_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(offset_b, 1), 2), -1)
+    offset_c_out_out_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(offset_c_out, 0), 2), -1)
+    h_out_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(h_out_idx, 0), 1), -1)
+    w_out_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(w_out_idx, 0), 1), 2)
+    
+    # Compute block offsets for spatial dimensions
+    block_h_start = pid0 * (bm - R + 1)
+    block_w_start = pid1 * (bn - S + 1)
+    
+    # Output offset calculation for 4D: (B, c_out, H_out, W_out)
+    # offset = b*stride_b + c_out*stride_cout + h*stride_h + w*stride_w
+    offset_output_4d = offset_b_out_4d * stride_output_b + \
+                       offset_c_out_out_4d * stride_output_cout + \
+                       (block_h_start + h_out_4d) * stride_output_h + \
+                       (block_w_start + w_out_4d) * stride_output_w
+    
+    # Output mask (4D)
+    mask_b_out = offset_b < B
+    mask_c_out_out = offset_c_out < c_out
+    mask_h_out = (h_out_idx < (bm - R + 1)) & ((block_h_start + h_out_idx) < H_out)
+    mask_w_out = (w_out_idx < (bn - S + 1)) & ((block_w_start + w_out_idx) < W_out)
+    
+    mask_b_out_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(mask_b_out, 1), 2), -1)
+    mask_c_out_out_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(mask_c_out_out, 0), 2), -1)
+    mask_h_out_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(mask_h_out, 0), 1), -1)
+    mask_w_out_4d = tl.expand_dims(tl.expand_dims(tl.expand_dims(mask_w_out, 0), 1), 2)
+    
+    mask_output_4d = mask_b_out_4d & mask_c_out_out_4d & mask_h_out_4d & mask_w_out_4d
 
     #Read Inputs
     input_features_slice = tl.load(input_features_ptr + offset_input, mask=mask_input)
     kernel = tl.load(kernel_ptr + offset_kernel, mask=mask_kernel)
+    kernel = kernel.reshape(c_out, c_in*R*S)
+    print_if(kernel, '')
 
     # Compute convolution directly
     # Initialize output accumulator by loading zeros or computing directly
-    # Workaround: Instead of tl.zeros, initialize by computation
-    # Create indices for output block
-    h_out_idx = tl.arange(0, h_out_padded)
-    w_out_idx = tl.arange(0, w_out_padded)
-    
+    # Workaround: Instead of tl.zeros, initialize by computation    
     # Initialize accumulator to zero
     # Workaround: Use arange and multiply by 0.0 instead of tl.zeros
     # (tl.zeros has issues with constexpr parameters in interpreter mode)
     ones_h = tl.arange(0, h_out_padded).to(tl.float32) * 0.0 + 1.0
     ones_w = tl.arange(0, w_out_padded).to(tl.float32) * 0.0 + 1.0
-    output_val = tl.expand_dims(ones_h, 1) + tl.expand_dims(ones_w, 0)
+    ones_c_out = tl.arange(0, c_out_padded).to(tl.float32) * 0.0 + 1.0
+    ones_b = tl.arange(0, B_padded).to(tl.float32) * 0.0 + 1.0
+
+    w_expanded = tl.expand_dims(tl.expand_dims(tl.expand_dims(ones_w, 0),1),2)
+    h_expanded = tl.expand_dims(tl.expand_dims(tl.expand_dims(ones_h, 0),1),-1)
+    c_out_expanded = tl.expand_dims(tl.expand_dims(tl.expand_dims(ones_c_out, 0),-1),-1)
+    b_expanded = tl.expand_dims(tl.expand_dims(tl.expand_dims(ones_b, -1),-1),-1)
+
+    output_val = b_expanded + c_out_expanded + h_expanded + w_expanded
     
     # TODO: Implement proper convolution computation
-    # For now, this initializes output to zero
-    # The actual convolution needs to:
-    # 1. Iterate over output positions (h_out, w_out) in the block
-    # 2. For each position, iterate over kernel (r, s) and input channels (c_in)
-    # 3. Accumulate: output[h_out, w_out] += 
-    #    input[c_in, h_out+r, w_out+s] * kernel[c_out, c_in, r, s]
-    # 4. Handle multiple output channels (c_out) - may need outer loop
+    for idx_row in range(H_out):
+        for idx_col in range(W_out):
+            temp_input_patch = input_features_slice[:,:,idx_row:idx_row+R,idx_col:idx_col+S]
+            output_val[:,:,idx_row, idx_col] = tl.dot(.reshape(B,c_in*R*S), 
+                tl.trans())
 
-    #Write result  
-    # Calculate 1D offset for output block
-    output_offset_2d = tl.expand_dims(h_out_idx, 1) * W_out + tl.expand_dims(w_out_idx, 0)
-    
-    # Compute block offset for this program ID
-    block_h_offset = pid0 * (bm-R+1)
-    block_w_offset = pid1 * (bn-S+1)
-    block_offset = block_h_offset * W_out + block_w_offset
-    
-    # Store output with proper masking
-    output_ptr_2d = output_features_ptr + block_offset + output_offset_2d
-    output_mask_2d = (tl.expand_dims(h_out_idx, 1) < (bm-R+1)) & (tl.expand_dims(w_out_idx, 0) < (bn-S+1))
-    tl.store(output_ptr_2d, output_val, mask=output_mask_2d)
+    tl.store(output_features_ptr + offset_output_4d, output_val, mask=mask_output_4d)
 
 
 def next_power_of_2(n):
@@ -156,23 +193,49 @@ def conv2d_triton(input_features:torch.Tensor, kernel:torch.Tensor, bm:int = 4, 
     R_padded = next_power_of_2(R)
     S_padded = next_power_of_2(S)
     c_out_padded = next_power_of_2(c_out)
+    B_padded = next_power_of_2(B)
+    c_in_padded = next_power_of_2(c_in)
     h_out_padded = next_power_of_2(bm - R + 1)
     w_out_padded = next_power_of_2(bn - S + 1)
 
-    output_features = torch.zeros((c_out, H_out, W_out), dtype=torch.float32, device='cuda')
+    # Compute strides for flattened tensors
+    # Input: (B, c_in, H, W) - already contiguous, compute strides
+    stride_input_b = c_in * H * W
+    stride_input_c = H * W
+    stride_input_h = W
+    stride_input_w = 1
+    
+    # Kernel: (c_out, c_in, R, S)
+    stride_kernel_cout = c_in * R * S
+    stride_kernel_cin = R * S
+    stride_kernel_r = S
+    stride_kernel_s = 1
+    
+    # Output: (B, c_out, H_out, W_out)
+    stride_output_b = c_out * H_out * W_out
+    stride_output_cout = H_out * W_out
+    stride_output_h = W_out
+    stride_output_w = 1
+
+    output_features = torch.zeros((B, c_out, H_out, W_out), dtype=torch.float32, device=input_features.device)
     grid_dict = {'bm':bm, 'bn':bn}
     grid = lambda meta:(triton.cdiv(H,meta['bm']), triton.cdiv(W,meta['bn']))
-    conv2d_kernel[grid(grid_dict)](input_features, kernel, output_features, B, c_in, H, W,
-        c_out, R, S, H_out, W_out, bm, bn, R_padded, S_padded, c_out_padded, h_out_padded, w_out_padded)
-    output_features.view(c_out, H_out, W_out)
+    conv2d_kernel[grid(grid_dict)](
+        input_features, kernel, output_features,
+        stride_input_b, stride_input_c, stride_input_h, stride_input_w,
+        stride_kernel_cout, stride_kernel_cin, stride_kernel_r, stride_kernel_s,
+        stride_output_b, stride_output_cout, stride_output_h, stride_output_w,
+        B, c_in, H, W, c_out, R, S, H_out, W_out, bm, bn, 
+        R_padded, S_padded, c_out_padded, B_padded, c_in_padded,
+        h_out_padded, w_out_padded)
 
     return output_features
 
 
 
 def main():
-    H = 4
-    W = 4
+    H = 8
+    W = 8
 
     R = 3
     S = 3
