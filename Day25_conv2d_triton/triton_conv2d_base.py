@@ -9,7 +9,7 @@ import triton.language as tl
 from src.utils import breakpoint_if, print_if
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-os.environ['TRITON_INTERPRET']='1'
+os.environ['TRITON_INTERPRET']='0'
 
 class Conv2dPytorch(nn.Module):
     def __init__(self, c_in, c_out, R, S, kernel):
@@ -141,36 +141,18 @@ def conv2d_kernel(input_features_ptr, kernel_ptr, output_features_ptr,
     
     mask_output_4d = mask_b_out_4d & mask_c_out_out_4d & mask_h_out_4d & mask_w_out_4d
 
-    #Read Inputs
+    #Read Inputs - Load input block and kernel once
     input_features_slice = tl.load(input_features_ptr + offset_input, mask=mask_input)
     kernel = tl.load(kernel_ptr + offset_kernel, mask=mask_kernel)
-    kernel = kernel.reshape(c_out, c_in*R*S)
-    print_if(kernel, '')
-
-    # Compute convolution directly
-    # Initialize output accumulator by loading zeros or computing directly
-    # Workaround: Instead of tl.zeros, initialize by computation    
-    # Initialize accumulator to zero
-    # Workaround: Use arange and multiply by 0.0 instead of tl.zeros
-    # (tl.zeros has issues with constexpr parameters in interpreter mode)
-    ones_h = tl.arange(0, h_out_padded).to(tl.float32) * 0.0 + 1.0
-    ones_w = tl.arange(0, w_out_padded).to(tl.float32) * 0.0 + 1.0
-    ones_c_out = tl.arange(0, c_out_padded).to(tl.float32) * 0.0 + 1.0
-    ones_b = tl.arange(0, B_padded).to(tl.float32) * 0.0 + 1.0
-
-    w_expanded = tl.expand_dims(tl.expand_dims(tl.expand_dims(ones_w, 0),1),2)
-    h_expanded = tl.expand_dims(tl.expand_dims(tl.expand_dims(ones_h, 0),1),-1)
-    c_out_expanded = tl.expand_dims(tl.expand_dims(tl.expand_dims(ones_c_out, 0),-1),-1)
-    b_expanded = tl.expand_dims(tl.expand_dims(tl.expand_dims(ones_b, -1),-1),-1)
-
-    output_val = b_expanded + c_out_expanded + h_expanded + w_expanded
+    kernel = kernel.reshape(c_out_padded, c_in_padded*R_padded*S_padded)
+    output_val = tl.zeros((B_padded, c_out_padded, h_out_padded, w_out_padded), dtype=tl.float32)
     
-    # TODO: Implement proper convolution computation
-    for idx_row in range(H_out):
-        for idx_col in range(W_out):
-            temp_input_patch = input_features_slice[:,:,idx_row:idx_row+R,idx_col:idx_col+S]
-            output_val[:,:,idx_row, idx_col] = tl.dot(.reshape(B,c_in*R*S), 
-                tl.trans())
+    # Implicit GEMM: Extract patches from the loaded block and perform GEMM
+    # input_features_slice shape: (B_padded, c_in_padded, bm, bn)
+    # Output block size: (h_out_padded, w_out_padded) = (bm - R + 1, bn - S + 1)
+    
+    # Reshape input to 2D for patch extraction
+    
 
     tl.store(output_features_ptr + offset_output_4d, output_val, mask=mask_output_4d)
 
@@ -181,7 +163,7 @@ def next_power_of_2(n):
         return 1
     return 1 << (n - 1).bit_length()
 
-def conv2d_triton(input_features:torch.Tensor, kernel:torch.Tensor, bm:int = 4,  bn:int = 4):
+def conv2d_triton(input_features:torch.Tensor, kernel:torch.Tensor, bm:int = 16,  bn:int = 16):
     B, c_in, H, W = input_features.shape
     c_out, _, R, S = kernel.shape
     assert input_features.shape[1] == kernel.shape[1]
@@ -234,8 +216,8 @@ def conv2d_triton(input_features:torch.Tensor, kernel:torch.Tensor, bm:int = 4, 
 
 
 def main():
-    H = 8
-    W = 8
+    H = 4
+    W = 4
 
     R = 3
     S = 3
