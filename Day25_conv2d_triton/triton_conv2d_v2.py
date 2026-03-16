@@ -1,6 +1,10 @@
+import os
 import torch
 import triton
 import triton.language as tl
+from src.utils import breakpoint_if
+
+os.environ['TRITON_INTERPRET']='0'
 
 @triton.jit
 def conv2d_valid_nchw_kernel(

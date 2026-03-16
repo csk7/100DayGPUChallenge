@@ -5,3 +5,10 @@
 build/*
 *.json
 *.pyc
+
+Day36_MoE/weights/*
+Day36_MoE/data/*
+Day25_conv2d_triton/*
+Day30_FA2_2/*
+Day4_matMul_BlockTiling_Vectorize/matMul_block_tiling_2d_v3.cu
+Day4_matMul_BlockTiling_Vectorize/matMul_v3
