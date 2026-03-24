@@ -43,8 +43,7 @@ class MoE_V3_Kernel1(MoE_V3_Original):
         valid_mask = sorted_token_ids < num_valid_tokens
         valid_pos = valid_mask.nonzero(as_tuple=True)[0]
         orig_tokens = (sorted_token_ids[valid_pos].to(torch.long) // self.top_k)
-        valid_out = flat_output[valid_pos]
-        valid_out = valid_out * sorted_weights[valid_pos].unsqueeze(1)
+        valid_out = flat_output[valid_pos] * sorted_weights[valid_pos].unsqueeze(1)
 
         output = torch.zeros((T, d), device=hidden_state.device, dtype=torch.float32)
         output.index_add_(0, orig_tokens, valid_out.float())
