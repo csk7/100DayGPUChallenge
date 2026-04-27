@@ -1,6 +1,5 @@
 from bisect import bisect_left
 from dataclasses import dataclass
-from statistics import mean
 from typing import List, Optional, Dict
 from math import ceil
 import random
@@ -15,7 +14,7 @@ class Histogram:
         self.min_val = float("inf")
         self.max_val = float("-inf")
     
-    def add(self, latency_value:int, count:int = 1):
+    def add(self, latency_value:float, count:int = 1):
         idx = bisect_left(self.upper_bucket_limits, latency_value)   
         if(idx == len(self.counts)):
             idx = idx-1
@@ -35,20 +34,20 @@ class Histogram:
         self.max_val = max(self.max_val, other.max_val)
 
     def percentile(self, p:int) -> Optional[int]:
-        if self.total == 0:
+        if self.total_req == 0:
             return None
         cummulative = 0
-        p_inst = ceil(p/100.0*self.total)
+        p_inst = ceil(p/100.0*self.total_req)
         for i, c in enumerate(self.counts):
             cummulative += c
-            if(cummulative > p_inst):
+            if(cummulative >= p_inst):
                 return self.upper_bucket_limits[i]
         
         return self.upper_bucket_limits[-1]
 
     def copy(self) -> "Histogram":
         h = Histogram(self.upper_bucket_limits)
-        h.counts = self.counts
+        h.counts = self.counts[:]
         h.sum = self.sum
         h.total_req = self.total_req
         h.min_val = self.min_val
@@ -64,9 +63,9 @@ class Histogram:
         self.max_val = float("-inf")
 
     def average(self) -> Optional[float]:
-        if(self.total == 0):
+        if(self.total_req == 0):
             return None
-        return self.sum/self.total
+        return self.sum/self.total_req
 
 @dataclass
 class HistogramPacket:
@@ -151,46 +150,46 @@ class RollingHistogram:
         start_time = now - self.window_sec
         ret_val = Histogram(self.upper_bound_limit)
         for cur_hist, cur_time_stamp in zip(self.slots, self.timestamps):
-            if(cur_hist.total_req > 0) and (start_time < cur_time_stamp < now):
+            if(cur_hist.total_req > 0) and (start_time <= cur_time_stamp <= now):
                 ret_val.merge(cur_hist)
 
         return ret_val
 
     def percentile(self, p:int, now:int) -> Optional[int]:
-        self.merge_window(now).percentile(p)
+        return self.merge_window(now).percentile(p)
 
     def average(self, now:int):
-        self.merge_window(now).average()
+        return self.merge_window(now).average()
         
     def count(self, now:int) -> int:
-        self.merge_window(now).total_req
+        return self.merge_window(now).total_req
 
-class Aggregrator:
+class Aggregator:
     def __init__(self, window_sec, upper_bound_limit):
         self.upper_bound_limit = upper_bound_limit
         self.window_sec = window_sec
         self.metrics:Dict[str, RollingHistogram] = {}
 
     def receive(self, incoming_packet:HistogramPacket):
-        if incoming_packet.metric_name not in self.metrics.keys:
+        if incoming_packet.metric_name not in self.metrics.keys():
             self.metrics[incoming_packet.metric_name] = RollingHistogram(self.window_sec, self.upper_bound_limit)
         
         self.metrics[incoming_packet.metric_name].merge_packet(incoming_packet)
 
     def percentile(self, p, now, metric_name) -> Optional[int]:
-        if metric_name not in self.metrics.keys:
+        if metric_name not in self.metrics.keys():
             return None
         
         return self.metrics[metric_name].percentile(p, now)
 
     def average(self, now, metric_name):
-        if metric_name not in self.metrics.keys:
+        if metric_name not in self.metrics.keys():
             return None
 
         return self.metrics[metric_name].average(now)
 
     def count(self, now, metric_name):
-        if metric_name not in self.metrics.keys:
+        if metric_name not in self.metrics.keys():
             return None
 
         return self.metrics[metric_name].count(now)
@@ -202,7 +201,7 @@ def bucket_const(min_val:int, max_val:int, factor:float) -> List[int]:
     val = min_val
     
     while val < max_val:
-        ret_val.append(min_val)
+        ret_val.append(val)
         val *= factor
 
     ret_val.append(max_val)
@@ -214,8 +213,8 @@ def simulate():
     window_seconds = 300
     metric_name = "e2e_latency_ms"
 
-    workers_list = [Worker(i, "tpot", upper_bucket_limit) for i in range(num_workers)]
-    coordinater = Aggregrator(window_seconds, upper_bucket_limit)
+    workers_list = [Worker(i, metric_name, upper_bucket_limit) for i in range(num_workers)]
+    aggregator = Aggregator(window_seconds, upper_bucket_limit)
 
     #Simulate 10 mins of traffic
 
@@ -233,14 +232,14 @@ def simulate():
                 packets = worker.observe(second, latency_ms)
 
                 for packet in packets:
-                    coordinater.recieve(packet)
+                    aggregator.receive(packet)
 
         if second%60 == 0:
-            p50 = coordinater.percentile(50, second, metric_name)
-            p95 = coordinater.percentile(95, second, metric_name)
-            p99 = coordinater.percentile(99, second, metric_name)
-            avg = coordinater.average(second, metric_name)
-            count = coordinater.count(second, metric_name)
+            p50 = aggregator.percentile(50, second, metric_name)
+            p95 = aggregator.percentile(95, second, metric_name)
+            p99 = aggregator.percentile(99, second, metric_name)
+            avg = aggregator.average(second, metric_name)
+            count = aggregator.count(second, metric_name)
 
             print(
                 f"sec : {second}",
@@ -254,17 +253,17 @@ def simulate():
     for worker in workers_list:
         packet = worker.flush()
         if packet is not None:
-            coordinater.receive(packet)
+            aggregator.receive(packet)
 
     now = end_sec - 1
-    p50 = coordinater.percentile(50, now, metric_name)
-    p95 = coordinater.percentile(95, now, metric_name)
-    p99 = coordinater.percentile(99, now, metric_name)
-    avg = coordinater.average(now, metric_name)
-    count = coordinater.count(now, metric_name)
+    p50 = aggregator.percentile(50, now, metric_name)
+    p95 = aggregator.percentile(95, now, metric_name)
+    p99 = aggregator.percentile(99, now, metric_name)
+    avg = aggregator.average(now, metric_name)
+    count = aggregator.count(now, metric_name)
 
     print(
-        f"F sec : {second}",
+        f"F sec : {now}",
         f"F count : {count}",
         f"F avg  : {avg}",
         f"F p50 : {p50}",
